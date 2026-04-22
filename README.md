@@ -12,12 +12,29 @@ BUSI — 780 ảnh siêu âm vú
 `normal (0)` / `benign (1)` / `malignant (2)`
 
 ```
-archive/
+/workspace/busi_data/
 └── Dataset_BUSI_with_GT/
     ├── benign/       437 images, 454 masks
     ├── malignant/    210 images, 211 masks
     └── normal/       133 images, 133 masks
 ```
+
+Dataset có thể được tải tự động từ KaggleHub:
+
+```bash
+python main.py \
+    --mode debug \
+    --download_dataset \
+    --download_dir /workspace/busi_data
+```
+
+Sau khi tải xong, các lần chạy sau có thể dùng trực tiếp:
+
+```bash
+--data_root /workspace/busi_data/Dataset_BUSI_with_GT
+```
+
+> Không nên dùng `--download_dir /workspace` vì KaggleHub yêu cầu output dir rỗng.
 
 ---
 
@@ -61,9 +78,18 @@ Chạy fold 0, chỉ 3 epochs, in loss từng batch.
 Dùng để xác nhận: forward pass OK, loss giảm, không NaN, không crash.
 
 ```bash
-python lsec_net.py \
+python main.py \
     --mode debug \
-    --data_root ./archive/Dataset_BUSI_with_GT
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT
+```
+
+Nếu chưa tải dataset, chạy debug kèm download:
+
+```bash
+python main.py \
+    --mode debug \
+    --download_dataset \
+    --download_dir /workspace/busi_data
 ```
 
 **Khi nào dùng:** Lần đầu chạy, sau khi thay đổi model/loss, khi bị lỗi lạ.
@@ -78,9 +104,9 @@ Dùng `--folds 1` trước để lấy tín hiệu sớm, rồi `--folds 5` cho 
 **Bước 1 — Early signal (fold 0 only):**
 
 ```bash
-python lsec_net.py \
+python main.py \
     --mode train \
-    --data_root ./archive/Dataset_BUSI_with_GT \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --folds 1 \
     --epochs 40 \
     --batch_size 32
@@ -93,9 +119,9 @@ Output sau fold 0:
 **Bước 2 — Full 5-fold CV:**
 
 ```bash
-python lsec_net.py \
+python main.py \
     --mode train \
-    --data_root ./archive/Dataset_BUSI_with_GT \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --folds 5 \
     --epochs 40 \
     --batch_size 32
@@ -131,18 +157,18 @@ Load 1 hoặc nhiều checkpoint, đánh giá trên locked test set.
 **Đánh giá 1 checkpoint:**
 
 ```bash
-python lsec_net.py \
+python main.py \
     --mode evaluate \
-    --data_root ./archive/Dataset_BUSI_with_GT \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --checkpoint proposed_fold0.pth
 ```
 
 **Đánh giá tất cả 5 folds và aggregate:**
 
 ```bash
-python lsec_net.py \
+python main.py \
     --mode evaluate \
-    --data_root ./archive/Dataset_BUSI_with_GT \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --checkpoint proposed_fold0.pth proposed_fold1.pth proposed_fold2.pth proposed_fold3.pth proposed_fold4.pth
 ```
 
@@ -160,10 +186,21 @@ python lsec_net.py \
 |---|---|---|
 | `--mode` | — | `debug` / `train` / `evaluate` (bắt buộc) |
 | `--data_root` | `/workspace/Dataset_BUSI_with_GT` | Path đến thư mục dataset |
+| `--download_dataset` | `False` | Tải BUSI từ KaggleHub trước khi chạy |
+| `--download_dir` | `/workspace` | Thư mục để KaggleHub tải dataset vào |
+| `--force_download` | `False` | Ép KaggleHub tải lại dataset |
 | `--folds` | `1` | Số folds cần chạy (1–5) |
 | `--epochs` | `40` | Số epochs tối đa mỗi fold |
 | `--batch_size` | `32` | Batch size |
 | `--checkpoint` | `None` | Path checkpoint(s) cho evaluate mode |
+
+Nếu CUDA báo GPU bận hoặc không khả dụng, có thể test flow bằng CPU:
+
+```bash
+CUDA_VISIBLE_DEVICES="" python main.py \
+    --mode debug \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT
+```
 
 ---
 

@@ -23,7 +23,7 @@ class LSECLoss(nn.Module):
     """
     L_total = L_cls + λ1 * L_align + λ2 * L_out
 
-    L_cls   : CrossEntropy — learn correct class
+    L_cls   : CrossEntropy (+ label smoothing) — learn correct class
     L_align : Dice(CAM, mask) — CAM must overlap with lesion
     L_out   : mean(CAM * (1-mask)) — CAM must not leak outside lesion
 
@@ -31,9 +31,9 @@ class LSECLoss(nn.Module):
     Proposed: λ1=1.0, λ2=0.3
     """
 
-    def __init__(self, lambda1=1.0, lambda2=0.3, class_weights=None):
+    def __init__(self, lambda1=1.0, lambda2=0.3, class_weights=None, label_smoothing=0.1):
         super().__init__()
-        self.ce = nn.CrossEntropyLoss(weight=class_weights)
+        self.ce = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
         self.l1 = lambda1
         self.l2 = lambda2
 

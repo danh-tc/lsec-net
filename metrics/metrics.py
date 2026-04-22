@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 import torch
+import torchvision.transforms.functional as TF
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     mean_absolute_error, mean_squared_error,
@@ -58,12 +59,20 @@ def compute_xai_metrics(cam, mask):
 # Classification + XAI combined evaluation
 # ─────────────────────────────────────────────
 
-def evaluate_model(model_name, model, loader, device, save_cm=True):
+_TTA_AUGS = [
+    lambda x: x,
+    TF.hflip,
+    TF.vflip,
+]
+
+
+def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
     """
     Full evaluation pass:
       - Accuracy, Precision, Recall, F1 (weighted + macro), MAE, RMSE, AUC
       - Pointing Game, Soft IoU, Inside Ratio (gated: accuracy >= XAI_ACC_THRESHOLD)
       - Confusion matrix saved as PNG if save_cm=True
+      - tta=True: averages softmax over hflip / vflip / original (XAI uses original feat)
 
     Returns dict of all metrics.
     """
@@ -77,9 +86,19 @@ def evaluate_model(model_name, model, loader, device, save_cm=True):
             mask   = batch['mask'].to(device)
             labels = batch['label'].to(device)
 
-            logits, feat = model(img)
-            preds  = logits.argmax(1)
-            probs  = torch.softmax(logits, 1)
+            if tta:
+                tta_probs = []
+                for aug in _TTA_AUGS:
+                    logits, _ = model(aug(img))
+                    tta_probs.append(torch.softmax(logits, 1))
+                probs = torch.stack(tta_probs).mean(0)
+                preds = probs.argmax(1)
+                # XAI uses original-image features for interpretability consistency
+                _, feat = model(img)
+            else:
+                logits, feat = model(img)
+                preds  = logits.argmax(1)
+                probs  = torch.softmax(logits, 1)
 
             all_labels.extend(labels.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())

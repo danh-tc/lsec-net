@@ -14,7 +14,13 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from data.dataset import build_file_list, make_splits, BUSIDataset, get_transforms
+from data.dataset import (
+    build_file_list,
+    download_busi_dataset,
+    make_splits,
+    BUSIDataset,
+    get_transforms,
+)
 from models.lsec_net import LSECNet
 from losses.losses import LSECLoss
 from metrics.metrics import evaluate_model, aggregate_results, print_result_table
@@ -73,7 +79,7 @@ def mode_debug(args, device):
 
 def mode_train(args, device):
     print("\n" + "="*50)
-    print(f"  MODE: TRAIN  |  folds={args.folds}  |  epochs={args.epochs}")
+    print(f"  MODE: TRAIN  |  variant={args.variant}  |  folds={args.folds}  |  epochs={args.epochs}")
     print("="*50)
 
     file_list = build_file_list(args.data_root)
@@ -81,36 +87,45 @@ def mode_train(args, device):
 
     train_val, test_set, folds = make_splits(file_list)
 
+    run_a = args.variant in ('A', 'both')
+    run_b = args.variant in ('B', 'both')
+
+    baseline_results = proposed_results = None
+
     # ── Variant A: Baseline (L_cls only) ────────────────────────
-    print("\n" + "★"*50)
-    print("  VARIANT A — GradCAM Baseline  (L_cls only)")
-    print("★"*50)
-    baseline_results = train_and_evaluate(
-        train_val, test_set, folds,
-        use_mask_loss=False,
-        n_folds_to_run=args.folds,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        device=device,
-        variant_name='baseline',
-    )
+    if run_a:
+        print("\n" + "★"*50)
+        print("  VARIANT A — GradCAM Baseline  (L_cls only)")
+        print("★"*50)
+        baseline_results = train_and_evaluate(
+            train_val, test_set, folds,
+            use_mask_loss=False,
+            n_folds_to_run=args.folds,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            device=device,
+            variant_name='baseline',
+            tta=args.tta,
+        )
 
     # ── Variant B: LSEC-Net (L_cls + L_align + L_out) ───────────
-    print("\n" + "★"*50)
-    print("  VARIANT B — LSEC-Net Proposed  (L_cls + L_align + L_out)")
-    print("★"*50)
-    proposed_results = train_and_evaluate(
-        train_val, test_set, folds,
-        use_mask_loss=True,
-        n_folds_to_run=args.folds,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        device=device,
-        variant_name='proposed',
-    )
+    if run_b:
+        print("\n" + "★"*50)
+        print("  VARIANT B — LSEC-Net Proposed  (L_cls + L_align + L_out)")
+        print("★"*50)
+        proposed_results = train_and_evaluate(
+            train_val, test_set, folds,
+            use_mask_loss=True,
+            n_folds_to_run=args.folds,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            device=device,
+            variant_name='proposed',
+            tta=args.tta,
+        )
 
-    # ── Final comparison (only meaningful with multiple folds) ───
-    if args.folds > 1:
+    # ── Final comparison (only meaningful when both ran + multiple folds) ──
+    if run_a and run_b and args.folds > 1:
         print("\n" + "="*68)
         print("  FINAL COMPARISON")
         print("="*68)
@@ -149,7 +164,7 @@ def mode_evaluate(args, device):
 
         model_name = os.path.splitext(os.path.basename(ckpt_path))[0]
         print(f"\n  Checkpoint : {ckpt_path}")
-        res = evaluate_model(model_name, model, test_loader, device, save_cm=True)
+        res = evaluate_model(model_name, model, test_loader, device, save_cm=True, tta=args.tta)
         fold_results.append(res)
 
     if len(fold_results) > 1:
@@ -169,11 +184,22 @@ def parse_args():
                    choices=['debug', 'train', 'evaluate'])
     p.add_argument('--data_root',  default='/workspace/Dataset_BUSI_with_GT',
                    help='Path to Dataset_BUSI_with_GT directory')
+    p.add_argument('--download_dataset', action='store_true',
+                   help='Download BUSI from KaggleHub into --download_dir before running')
+    p.add_argument('--download_dir', default='/workspace',
+                   help='Directory where KaggleHub should download BUSI')
+    p.add_argument('--force_download', action='store_true',
+                   help='Force KaggleHub to download BUSI again')
+    p.add_argument('--variant',    choices=['A', 'B', 'both'], default='both',
+                   help='Variant to train: A=baseline (L_cls only), B=proposed (L_cls+L_align+L_out), both=run both')
+    p.add_argument('--tta',        action='store_true',
+                   help='Enable Test-Time Augmentation during final evaluation')
     p.add_argument('--folds',      type=int, default=1,
                    help='Folds to run: 1 for early signal, 5 for full CV (train mode)')
     p.add_argument('--epochs',     type=int, default=40,
                    help='Max epochs per fold')
-    p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--batch_size', type=int, default=16,
+                   help='Batch size (default 16; BUSI ~400 train samples → stable gradient)')
     p.add_argument('--checkpoint', nargs='+', default=None,
                    help='Checkpoint .pth path(s) for evaluate mode')
     return p.parse_args()
@@ -181,6 +207,12 @@ def parse_args():
 
 def main():
     args   = parse_args()
+    if args.download_dataset:
+        args.data_root = download_busi_dataset(
+            download_dir=args.download_dir,
+            force_download=args.force_download,
+        )
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device : {device}")
     if device.type == 'cuda':

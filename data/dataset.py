@@ -1,4 +1,5 @@
 import os
+import random
 import numpy as np
 from collections import Counter
 from PIL import Image
@@ -6,18 +7,74 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision.transforms.functional as TF
+from torchvision.transforms import InterpolationMode
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
 CLASS_MAP         = {'normal': 0, 'benign': 1, 'malignant': 2}
 CLASS_NAMES       = ['Normal', 'Benign', 'Malignant']   # index 0,1,2
 XAI_ACC_THRESHOLD = 0.88
+BUSI_KAGGLE_HANDLE = 'sabahesaraki/breast-ultrasound-images-dataset'
+
+
+def _is_busi_root(path):
+    return all(
+        os.path.isdir(os.path.join(path, cls_name))
+        for cls_name in CLASS_MAP
+    )
+
+
+def find_busi_root(search_root):
+    if _is_busi_root(search_root):
+        return search_root
+
+    for dirpath, dirnames, _ in os.walk(search_root):
+        if all(cls_name in dirnames for cls_name in CLASS_MAP):
+            return dirpath
+
+    return None
+
+
+def download_busi_dataset(download_dir='/workspace', force_download=False):
+    """
+    Downloads BUSI from KaggleHub into download_dir and returns Dataset_BUSI root.
+    """
+    try:
+        import kagglehub
+    except ImportError as exc:
+        raise ImportError(
+            "kagglehub is required to download BUSI. "
+            "Install dependencies with: pip install -r requirements.txt"
+        ) from exc
+
+    os.makedirs(download_dir, exist_ok=True)
+    path = kagglehub.dataset_download(
+        BUSI_KAGGLE_HANDLE,
+        output_dir=download_dir,
+        force_download=force_download,
+    )
+    data_root = find_busi_root(path) or find_busi_root(download_dir)
+
+    if data_root is None:
+        raise FileNotFoundError(
+            "Downloaded BUSI dataset, but could not find folders: "
+            f"{', '.join(CLASS_MAP.keys())}. KaggleHub path: {path}"
+        )
+
+    print(f"Path to dataset files: {path}")
+    print(f"BUSI data_root: {data_root}")
+    return data_root
 
 
 def build_file_list(root):
     """
     Returns list of (img_path, merged_mask_path, label_int).
     Multiple masks are merged via OR. Normal class → all-zero mask.
+    Merged masks are cached in {root}/_merged_masks/ to keep class folders clean.
     """
+    cache_dir = os.path.join(root, '_merged_masks')
+    os.makedirs(cache_dir, exist_ok=True)
+
     file_list = []
 
     for cls_name, cls_idx in CLASS_MAP.items():
@@ -51,7 +108,7 @@ def build_file_list(root):
                     merged_mask = np.maximum(merged_mask, m)
                 merged_mask = (merged_mask > 128).astype(np.uint8) * 255
 
-            merged_path = os.path.join(cls_dir, stem + '_merged_mask.png')
+            merged_path = os.path.join(cache_dir, f'{cls_name}_{stem}_merged_mask.png')
             Image.fromarray(merged_mask).save(merged_path)
             file_list.append((img_path, merged_path, cls_idx))
 
@@ -75,6 +132,55 @@ def make_splits(file_list, test_size=0.2, n_folds=5, seed=42):
     return train_val, test_set, folds
 
 
+class PairedTransform:
+    """Applies spatial augmentation identically to both image and mask."""
+
+    def __init__(self, mode='train'):
+        self.mode = mode
+        self.color_jitter = transforms.ColorJitter(
+            brightness=0.3, contrast=0.3, saturation=0.1
+        )
+
+    def __call__(self, img, mask):
+        # img: PIL RGB  |  mask: PIL L
+        if self.mode == 'train':
+            # RandomResizedCrop: scale jitter 80–100%, slight aspect ratio variation
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                img, scale=(0.8, 1.0), ratio=(0.85, 1.15)
+            )
+            img  = TF.resized_crop(img,  i, j, h, w, [224, 224])
+            mask = TF.resized_crop(mask, i, j, h, w, [224, 224],
+                                   interpolation=InterpolationMode.NEAREST)
+
+            if random.random() < 0.5:
+                img  = TF.hflip(img)
+                mask = TF.hflip(mask)
+            if random.random() < 0.5:
+                img  = TF.vflip(img)
+                mask = TF.vflip(mask)
+            angle = random.uniform(-15, 15)
+            img  = TF.rotate(img,  angle)
+            mask = TF.rotate(mask, angle, interpolation=InterpolationMode.NEAREST)
+            img  = self.color_jitter(img)
+        else:
+            img  = TF.resize(img,  [224, 224])
+            mask = TF.resize(mask, [224, 224], interpolation=InterpolationMode.NEAREST)
+
+        img  = TF.to_tensor(img)
+        img  = TF.normalize(img, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+        # Gaussian noise: simulate ultrasound speckle (train only, after normalize)
+        if self.mode == 'train':
+            img = img + torch.randn_like(img) * 0.02
+            img = img.clamp(-3.0, 3.0)
+
+        mask = torch.from_numpy(
+            (np.array(mask, dtype=np.float32) > 128).astype(np.float32)
+        ).unsqueeze(0)
+
+        return img, mask
+
+
 class BUSIDataset(Dataset):
     def __init__(self, file_list, transform=None):
         self.file_list = file_list
@@ -86,11 +192,10 @@ class BUSIDataset(Dataset):
     def __getitem__(self, idx):
         img_path, mask_path, label = self.file_list[idx]
         img  = Image.open(img_path).convert('RGB')
-        mask = np.array(Image.open(mask_path).convert('L'))
-        mask = torch.from_numpy((mask > 128).astype(np.float32)).unsqueeze(0)
+        mask = Image.open(mask_path).convert('L')
 
         if self.transform:
-            img = self.transform(img)
+            img, mask = self.transform(img, mask)
 
         return {
             'image': img,
@@ -100,18 +205,4 @@ class BUSIDataset(Dataset):
 
 
 def get_transforms(mode='train'):
-    if mode == 'train':
-        return transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(0.5),
-            transforms.RandomVerticalFlip(0.5),
-            transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
+    return PairedTransform(mode)

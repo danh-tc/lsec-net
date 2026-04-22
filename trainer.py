@@ -7,6 +7,9 @@ from models.lsec_net import LSECNet
 from losses.losses import LSECLoss
 from metrics.metrics import evaluate_model, aggregate_results
 
+BACKBONE_LR = 5e-5   # backbone fine-tune LR after warmup
+HEAD_LR     = 1e-4   # head LR after warmup
+
 
 def compute_class_weights(labels, num_classes):
     counts = np.bincount(labels, minlength=num_classes).astype(float)
@@ -14,11 +17,15 @@ def compute_class_weights(labels, num_classes):
 
 
 def run_fold(model, criterion, train_loader, val_loader,
-             epochs, device, fold_idx, debug=False):
+             epochs, device, fold_idx, use_mask_loss=True, debug=False):
     """
     2-phase training for a single fold:
-      Phase 1 (warmup epochs): backbone frozen, head only
-      Phase 2 (remaining):     full fine-tune with cosine LR decay
+      Phase 1 (warmup): backbone frozen, head only at lr=1e-3
+      Phase 2:          backbone unfrozen via add_param_group (preserves head
+                        momentum), backbone lr=5e-5, head lr=1e-4, cosine decay
+
+    Mixup (alpha=0.2) is applied only for the baseline variant (no mask loss)
+    because mixed images have no valid corresponding GT mask for alignment.
 
     Returns (best_state_dict, best_val_f1_macro).
     """
@@ -27,9 +34,10 @@ def run_fold(model, criterion, train_loader, val_loader,
                        list(model.dropout.parameters()) +
                        list(model.classifier.parameters()))
 
-    WARMUP = 5 if not debug else 1
+    WARMUP    = 5 if not debug else 1
+    use_mixup = not use_mask_loss   # Mixup safe only when no CAM alignment loss
 
-    # Phase 1: freeze backbone
+    # Phase 1: freeze backbone, train head only
     for p in backbone_params:
         p.requires_grad = False
     optimizer = torch.optim.AdamW(head_params, lr=1e-3, weight_decay=1e-4)
@@ -39,14 +47,15 @@ def run_fold(model, criterion, train_loader, val_loader,
 
     for epoch in range(epochs):
 
-        # Switch to phase 2
+        # ── Switch to phase 2 ────────────────────────────────────
         if epoch == WARMUP:
             for p in backbone_params:
                 p.requires_grad = True
-            optimizer = torch.optim.AdamW([
-                {'params': backbone_params, 'lr': 1e-5},
-                {'params': head_params,     'lr': 1e-4},
-            ], weight_decay=1e-4)
+            # add_param_group preserves head Adam momentum accumulated so far
+            optimizer.add_param_group(
+                {'params': backbone_params, 'lr': BACKBONE_LR, 'weight_decay': 1e-4}
+            )
+            optimizer.param_groups[0]['lr'] = HEAD_LR
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=epochs - WARMUP)
 
@@ -60,8 +69,23 @@ def run_fold(model, criterion, train_loader, val_loader,
             labels = batch['label'].to(device)
 
             optimizer.zero_grad()
-            logits, feat      = model(img)
-            loss, loss_parts  = criterion(logits, feat, model, labels, mask)
+
+            if use_mixup and np.random.random() < 0.5:
+                lam   = float(np.random.beta(0.2, 0.2))
+                idx   = torch.randperm(img.size(0), device=device)
+                mixed = lam * img + (1 - lam) * img[idx]
+                lab_b = labels[idx]
+
+                logits, feat   = model(mixed)
+                loss_a, parts_a = criterion(logits, feat, model, labels,  mask)
+                loss_b, parts_b = criterion(logits, feat, model, lab_b,   mask)
+                loss       = lam * loss_a + (1 - lam) * loss_b
+                loss_parts = {k: lam * parts_a[k] + (1 - lam) * parts_b[k]
+                              for k in parts_a}
+            else:
+                logits, feat     = model(img)
+                loss, loss_parts = criterion(logits, feat, model, labels, mask)
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -107,7 +131,7 @@ def run_fold(model, criterion, train_loader, val_loader,
 def train_and_evaluate(train_val, test_set, folds,
                        use_mask_loss, n_folds_to_run,
                        epochs, batch_size, device,
-                       variant_name, debug=False):
+                       variant_name, tta=False, debug=False):
     """
     Runs n_folds_to_run folds for one variant (baseline or proposed).
     Prints a warning after fold 0 if test accuracy < XAI_ACC_THRESHOLD.
@@ -148,14 +172,14 @@ def train_and_evaluate(train_val, test_set, folds,
 
         best_state, _ = run_fold(
             model, criterion, train_loader, val_loader,
-            epochs, device, fold_idx, debug=debug)
+            epochs, device, fold_idx, use_mask_loss=use_mask_loss, debug=debug)
 
         # Evaluate on locked test set
         model.load_state_dict(best_state)
-        print(f"\n  [Test set — Fold {fold_idx}]")
+        print(f"\n  [Test set — Fold {fold_idx}]{'  (TTA)' if tta else ''}")
         test_res = evaluate_model(
             f'{variant_name}_fold{fold_idx}', model, test_loader,
-            device, save_cm=True)
+            device, save_cm=True, tta=tta)
 
         fold_test_results.append(test_res)
 
