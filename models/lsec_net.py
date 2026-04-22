@@ -10,14 +10,14 @@ class LSECNet(nn.Module):
     Returns (logits, feat) where feat = [B, 1536, 7, 7].
     """
 
-    def __init__(self, num_classes=3, pretrained=True):
+    def __init__(self, num_classes=3, pretrained=True, dropout=0.3):
         super().__init__()
         self.backbone   = timm.create_model(
             'efficientnet_b3', pretrained=pretrained,
             num_classes=0, global_pool=''
         )
         self.gap        = nn.AdaptiveAvgPool2d(1)
-        self.dropout    = nn.Dropout(0.3)
+        self.dropout    = nn.Dropout(dropout)
         self.classifier = nn.Linear(1536, num_classes)
 
     def forward(self, x):

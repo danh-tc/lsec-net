@@ -1,5 +1,6 @@
 import os
 import random
+import tempfile
 import numpy as np
 from collections import Counter
 from PIL import Image
@@ -109,7 +110,19 @@ def build_file_list(root):
                 merged_mask = (merged_mask > 128).astype(np.uint8) * 255
 
             merged_path = os.path.join(cache_dir, f'{cls_name}_{stem}_merged_mask.png')
-            Image.fromarray(merged_mask).save(merged_path)
+            if not os.path.exists(merged_path):
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=os.path.basename(merged_path),
+                    suffix='.tmp',
+                    dir=cache_dir,
+                )
+                os.close(fd)
+                try:
+                    Image.fromarray(merged_mask).save(tmp_path, format='PNG')
+                    os.replace(tmp_path, merged_path)
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
             file_list.append((img_path, merged_path, cls_idx))
 
     return file_list
@@ -135,33 +148,41 @@ def make_splits(file_list, test_size=0.2, n_folds=5, seed=42):
 class PairedTransform:
     """Applies spatial augmentation identically to both image and mask."""
 
-    def __init__(self, mode='train'):
+    def __init__(self, mode='train', aug='default'):
         self.mode = mode
+        self.aug = aug
         self.color_jitter = transforms.ColorJitter(
-            brightness=0.3, contrast=0.3, saturation=0.1
+            brightness=0.3 if aug == 'default' else 0.15,
+            contrast=0.3 if aug == 'default' else 0.15,
+            saturation=0.1 if aug == 'default' else 0.0,
         )
 
     def __call__(self, img, mask):
         # img: PIL RGB  |  mask: PIL L
-        if self.mode == 'train':
-            # RandomResizedCrop: scale jitter 80–100%, slight aspect ratio variation
+        if self.mode == 'train' and self.aug != 'none':
+            scale = (0.8, 1.0) if self.aug == 'default' else (0.9, 1.0)
+            ratio = (0.85, 1.15) if self.aug == 'default' else (0.95, 1.05)
+            angle_max = 15 if self.aug == 'default' else 10
+
             i, j, h, w = transforms.RandomResizedCrop.get_params(
-                img, scale=(0.8, 1.0), ratio=(0.85, 1.15)
+                img, scale=scale, ratio=ratio
             )
-            img  = TF.resized_crop(img,  i, j, h, w, [224, 224])
-            mask = TF.resized_crop(mask, i, j, h, w, [224, 224],
-                                   interpolation=InterpolationMode.NEAREST)
+            img = TF.resized_crop(img, i, j, h, w, [224, 224])
+            mask = TF.resized_crop(
+                mask, i, j, h, w, [224, 224],
+                interpolation=InterpolationMode.NEAREST,
+            )
 
             if random.random() < 0.5:
-                img  = TF.hflip(img)
+                img = TF.hflip(img)
                 mask = TF.hflip(mask)
-            if random.random() < 0.5:
-                img  = TF.vflip(img)
+            if self.aug == 'default' and random.random() < 0.5:
+                img = TF.vflip(img)
                 mask = TF.vflip(mask)
-            angle = random.uniform(-15, 15)
-            img  = TF.rotate(img,  angle)
+            angle = random.uniform(-angle_max, angle_max)
+            img = TF.rotate(img, angle)
             mask = TF.rotate(mask, angle, interpolation=InterpolationMode.NEAREST)
-            img  = self.color_jitter(img)
+            img = self.color_jitter(img)
         else:
             img  = TF.resize(img,  [224, 224])
             mask = TF.resize(mask, [224, 224], interpolation=InterpolationMode.NEAREST)
@@ -170,8 +191,9 @@ class PairedTransform:
         img  = TF.normalize(img, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
         # Gaussian noise: simulate ultrasound speckle (train only, after normalize)
-        if self.mode == 'train':
-            img = img + torch.randn_like(img) * 0.02
+        if self.mode == 'train' and self.aug != 'none':
+            noise_std = 0.02 if self.aug == 'default' else 0.01
+            img = img + torch.randn_like(img) * noise_std
             img = img.clamp(-3.0, 3.0)
 
         mask = torch.from_numpy(
@@ -204,5 +226,5 @@ class BUSIDataset(Dataset):
         }
 
 
-def get_transforms(mode='train'):
-    return PairedTransform(mode)
+def get_transforms(mode='train', aug='default'):
+    return PairedTransform(mode, aug=aug)

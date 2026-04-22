@@ -1,4 +1,6 @@
 import warnings
+import os
+import numbers
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -66,11 +68,12 @@ _TTA_AUGS = [
 ]
 
 
-def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
+def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False,
+                   output_dir=None, logit_bias=None, xai_min_acc=XAI_ACC_THRESHOLD):
     """
     Full evaluation pass:
       - Accuracy, Precision, Recall, F1 (weighted + macro), MAE, RMSE, AUC
-      - Pointing Game, Soft IoU, Inside Ratio (gated: accuracy >= XAI_ACC_THRESHOLD)
+      - Pointing Game, Soft IoU, Inside Ratio (gated by xai_min_acc)
       - Confusion matrix saved as PNG if save_cm=True
       - tta=True: averages softmax over hflip / vflip / original (XAI uses original feat)
 
@@ -79,6 +82,8 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
     model.eval()
     all_labels, all_preds, all_probs = [], [], []
     xai_cams, xai_masks = [], []
+    if logit_bias is not None:
+        logit_bias = torch.tensor(logit_bias, dtype=torch.float32, device=device).view(1, -1)
 
     with torch.no_grad():
         for batch in loader:
@@ -90,6 +95,8 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
                 tta_probs = []
                 for aug in _TTA_AUGS:
                     logits, _ = model(aug(img))
+                    if logit_bias is not None:
+                        logits = logits + logit_bias
                     tta_probs.append(torch.softmax(logits, 1))
                 probs = torch.stack(tta_probs).mean(0)
                 preds = probs.argmax(1)
@@ -97,6 +104,8 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
                 _, feat = model(img)
             else:
                 logits, feat = model(img)
+                if logit_bias is not None:
+                    logits = logits + logit_bias
                 preds  = logits.argmax(1)
                 probs  = torch.softmax(logits, 1)
 
@@ -136,17 +145,17 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
     print(f"  RMSE      : {rmse:.4f}")
     print(f"  AUC       : {auc:.4f}  (OvR)")
 
-    if accuracy >= XAI_ACC_THRESHOLD and xai_cams:
+    if accuracy >= xai_min_acc and xai_cams:
         xai = compute_xai_metrics(torch.cat(xai_cams), torch.cat(xai_masks))
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
     else:
-        print(f"  [XAI SKIP] accuracy {accuracy:.4f} < {XAI_ACC_THRESHOLD}")
+        print(f"  [XAI SKIP] accuracy {accuracy:.4f} < {xai_min_acc}")
         xai = {'pointing_game': None, 'soft_iou': None, 'inside_ratio': None}
 
     if save_cm:
-        _save_confusion_matrix(model_name, y_true, y_pred)
+        _save_confusion_matrix(model_name, y_true, y_pred, output_dir=output_dir)
 
     return {
         'accuracy':    accuracy,
@@ -161,7 +170,7 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False):
     }
 
 
-def _save_confusion_matrix(model_name, y_true, y_pred):
+def _save_confusion_matrix(model_name, y_true, y_pred, output_dir=None):
     cm_arr = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm_arr, annot=True, fmt='d', cmap='Blues',
@@ -170,6 +179,9 @@ def _save_confusion_matrix(model_name, y_true, y_pred):
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     fname = f'Confusion_{model_name.replace(" ", "_")}.png'
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        fname = os.path.join(output_dir, fname)
     plt.savefig(fname, dpi=600, bbox_inches='tight')
     plt.close()
     print(f"  CM saved  : {fname}")
@@ -194,6 +206,10 @@ def aggregate_results(fold_results):
         if not vals:
             print(f"  {k:<22}: N/A (no fold passed XAI threshold)")
             agg[k] = {'mean': None, 'std': None}
+            continue
+        if not all(isinstance(v, numbers.Number) for v in vals):
+            print(f"  {k:<22}: stored per fold (non-scalar)")
+            agg[k] = {'values': vals}
             continue
         suffix = f'  [{len(vals)}/5]' if k in XAI_KEYS else ''
         print(f"  {k:<22}: {np.mean(vals):.4f}  ±{np.std(vals):.4f}{suffix}")
