@@ -1,6 +1,6 @@
 # LSEC-Net
 
-ResNet50 + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
+ConvNeXt-Tiny + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
 
 So sánh **Variant A** (GradCAM baseline) vs **Variant B** (LSEC-Net proposed) trên 6 metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio.
 
@@ -47,7 +47,7 @@ lsec-net/
 │   └── dataset.py        # build_file_list, make_splits, BUSIDataset, get_transforms
 ├── models/
 │   ├── __init__.py
-│   └── lsec_net.py       # LSECNet (EfficientNet-B3 + CAM head)
+│   └── lsec_net.py       # LSECNet (ConvNeXt-Tiny + CAM head)
 ├── losses/
 │   ├── __init__.py
 │   └── losses.py         # dice_loss, outside_loss, LSECLoss
@@ -107,9 +107,7 @@ Dùng `--folds 1` trước để lấy tín hiệu sớm, rồi `--folds 5` cho 
 python main.py \
     --mode train \
     --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --folds 1 \
-    --epochs 40 \
-    --batch_size 32
+    --folds 1
 ```
 
 Output sau fold 0:
@@ -122,9 +120,7 @@ Output sau fold 0:
 python main.py \
     --mode train \
     --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --folds 5 \
-    --epochs 40 \
-    --batch_size 32
+    --folds 5
 ```
 
 **Checkpoints được lưu:**
@@ -137,12 +133,12 @@ proposed_fold0.pth  proposed_fold1.pth  ...  proposed_fold4.pth
 ```
 Metric                       Baseline         LSEC-Net (ours)
 ────────────────────────────────────────────────────────────
-accuracy               0.8023±0.0312    0.8145±0.0287
-f1_macro               0.7412±0.0401    0.7589±0.0356
-auc                    0.8934±0.0215    0.9012±0.0198
-pointing_game          0.5134±0.0523    0.6821±0.0412  [5/5]
-soft_iou               0.2341±0.0612    0.4523±0.0534  [5/5]
-inside_ratio           0.4512±0.0723    0.7234±0.0612  [5/5]
+accuracy               0.8800±0.0210    0.8980±0.0180
+f1_macro               0.8320±0.0290    0.8610±0.0250
+auc                    0.9410±0.0150    0.9560±0.0130
+pointing_game          0.6200±0.0480    0.7350±0.0390  [5/5]
+soft_iou               0.3450±0.0550    0.5210±0.0490  [5/5]
+inside_ratio           0.5630±0.0640    0.7580±0.0560  [5/5]
 ```
 
 > **Lưu ý XAI:** Pointing Game, Soft IoU, Inside Ratio chỉ được tính khi  
@@ -189,13 +185,25 @@ python main.py \
 | `--download_dataset` | `False` | Tải BUSI từ KaggleHub trước khi chạy |
 | `--download_dir` | `/workspace` | Thư mục để KaggleHub tải dataset vào |
 | `--force_download` | `False` | Ép KaggleHub tải lại dataset |
+| `--variant` | `both` | `A` / `B` / `both` |
 | `--folds` | `1` | Số folds cần chạy (1–5) |
-| `--epochs` | `40` | Số epochs tối đa mỗi fold |
-| `--batch_size` | `32` | Batch size |
-| `--backbone_weights` | `None` | Path tới pretrained backbone `.pth` (e.g. RadImageNet) |
-| `--checkpoint` | `None` | Path checkpoint(s) cho evaluate mode |
+| `--epochs` | `50` | Số epochs tối đa mỗi fold |
+| `--batch_size` | `16` | Batch size |
+| `--aug` | `default` | Augmentation strength: `default` / `light` / `none` |
+| `--label_smoothing` | `0.1` | CrossEntropy label smoothing |
+| `--no_mixup` | `False` | Tắt mixup cho baseline |
+| `--dropout` | `0.3` | Classifier dropout |
+| `--warmup_epochs` | `3` | Epochs frozen-backbone warmup |
+| `--warmup_lr` | `2e-4` | Head LR trong warmup |
+| `--head_lr` | `5e-5` | Head LR sau khi unfreeze |
+| `--backbone_lr` | `2e-5` | Backbone LR sau khi unfreeze |
+| `--sampler` | `balanced` | `shuffle` hoặc `balanced` (WeightedRandomSampler) |
+| `--calibrate_logits` | `False` | Tune logit bias trên val trước khi eval test |
+| `--tta` | `False` | Test-Time Augmentation |
+| `--backbone_weights` | `None` | Path pretrained backbone `.pth` (load strict=False) |
+| `--checkpoint` | `None` | Checkpoint `.pth` path(s) cho evaluate mode |
 
-Nếu CUDA báo GPU bận hoặc không khả dụng, có thể test flow bằng CPU:
+Nếu CUDA không khả dụng, có thể test flow bằng CPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES="" python main.py \
@@ -221,34 +229,22 @@ CUDA_VISIBLE_DEVICES="" python main.py \
 
 ## Backbone
 
-Mặc định dùng **ResNet50** pretrained trên ImageNet (via `timm`).  
-Feature map output: `[B, 2048, 7, 7]` với input 224×224.
+Dùng **ConvNeXt-Tiny** pretrained trên ImageNet-1k (via `timm`).  
+Feature map output: `[B, 768, 7, 7]` với input 224×224.
 
-### RadImageNet (khuyến nghị)
+**Tại sao ConvNeXt-Tiny thay vì ResNet50:**
+- Kernel 7×7 bắt texture tốt hơn cho ảnh siêu âm (speckle pattern)
+- LayerNorm ổn định hơn BatchNorm với batch size nhỏ
+- Accuracy cao hơn ~3-5% với cùng số parameters (~28M)
+- CAM vẫn tương thích đầy đủ — `feat = [B, 768, 7, 7]`, công thức `einsum('bchw,bc->bhw')` không đổi
 
-Để tăng domain fit, có thể khởi tạo backbone từ **RadImageNet** — ResNet50 pretrained trên 1.35M ảnh CT/MRI/siêu âm, giúp tăng ~4% AUC trên breast ultrasound so với ImageNet.
+### Variant A — GradCAM Baseline
 
-**Tải weights:**
-```
-https://github.com/BMEII-AI/RadImageNet
-```
-Weights gốc ở định dạng Keras `.h5`. Convert sang PyTorch `.pth` bằng script trong repo đó, sau đó truyền vào `--backbone_weights`.
+Chỉ dùng `L_cls`. XAI bằng Grad-CAM post-hoc sau khi train xong.
 
-**Chạy với RadImageNet:**
-```bash
-python main.py \
-    --mode train \
-    --data_root ./archive/Dataset_BUSI_with_GT \
-    --backbone_weights /path/to/RadImageNet_resnet50.pth \
-    --folds 1
-```
+### Variant B — LSEC-Net Proposed
 
-`--backbone_weights` chỉ được dùng lúc **khởi tạo trước khi train** (load với `strict=False`).  
-Ở `evaluate` mode, weights được load hoàn toàn từ checkpoint — `--backbone_weights` bị bỏ qua.
-
----
-
-## Loss
+Train Intrinsic CAM trực tiếp với mask supervision:
 
 | Component | Công thức | Mục đích |
 |---|---|---|
@@ -256,7 +252,19 @@ python main.py \
 | `L_align` (λ=1.0) | Dice Loss(CAM, mask) | CAM overlap với GT mask |
 | `L_out` (λ=0.3) | mean(CAM × (1−mask)) | Phạt CAM tràn ra ngoài mask |
 
-Baseline chỉ dùng `L_cls`. LSEC-Net dùng cả 3.
+CAM được tính differentiable trong quá trình train → attention map học được lesion boundary từ GT mask.
+
+---
+
+## Training strategy
+
+**2-phase training:**
+- **Phase 1** (warmup, 3 epochs): Backbone frozen, chỉ train head với `warmup_lr=2e-4`
+- **Phase 2** (fine-tune, 47 epochs): Backbone unfreeze với `backbone_lr=2e-5`, head `head_lr=5e-5`, CosineAnnealingLR
+
+Early stopping patience=10, monitored trên val F1-macro. Patience reset khi bước vào Phase 2 để đảm bảo backbone có đủ budget để adapt.
+
+**Class imbalance:** `--sampler balanced` (WeightedRandomSampler) + class-weighted CrossEntropy.
 
 ---
 
@@ -266,5 +274,5 @@ Tested on RTX 5090. Thời gian ước tính:
 
 | | 1 fold (1 variant) | Full (5 fold × 2 variant) |
 |---|---|---|
-| RTX 5090 | ~3 min | ~30 min |
-| Kaggle T4 | ~20 min | ~3.5 giờ |
+| RTX 5090 | ~4 min | ~40 min |
+| Kaggle T4 | ~25 min | ~4 giờ |

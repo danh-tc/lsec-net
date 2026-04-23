@@ -260,7 +260,7 @@ def parse_args():
                    help='Enable Test-Time Augmentation during final evaluation')
     p.add_argument('--folds',      type=int, default=1,
                    help='Folds to run: 1 for early signal, 5 for full CV (train mode)')
-    p.add_argument('--epochs',     type=int, default=40,
+    p.add_argument('--epochs',     type=int, default=50,
                    help='Max epochs per fold')
     p.add_argument('--batch_size', type=int, default=16,
                    help='Batch size (default 16; BUSI ~400 train samples → stable gradient)')
@@ -280,19 +280,19 @@ def parse_args():
                    help='Beta distribution alpha for mixup')
     p.add_argument('--class_weight_mode', choices=['inverse', 'none'], default='inverse',
                    help='Class weighting strategy for CrossEntropy')
-    p.add_argument('--dropout', type=float, default=0.4,
+    p.add_argument('--dropout', type=float, default=0.3,
                    help='Classifier dropout probability')
-    p.add_argument('--warmup_epochs', type=int, default=5,
+    p.add_argument('--warmup_epochs', type=int, default=3,
                    help='Frozen-backbone warmup epochs')
-    p.add_argument('--warmup_lr', type=float, default=1e-3,
+    p.add_argument('--warmup_lr', type=float, default=2e-4,
                    help='Head learning rate during frozen-backbone warmup')
-    p.add_argument('--head_lr', type=float, default=1e-4,
+    p.add_argument('--head_lr', type=float, default=5e-5,
                    help='Head learning rate after unfreezing')
-    p.add_argument('--backbone_lr', type=float, default=5e-5,
+    p.add_argument('--backbone_lr', type=float, default=2e-5,
                    help='Backbone learning rate after unfreezing')
     p.add_argument('--calibrate_logits', action='store_true',
                    help='Tune class logit offsets on validation fold before test evaluation')
-    p.add_argument('--sampler', choices=['shuffle', 'balanced'], default='shuffle',
+    p.add_argument('--sampler', choices=['shuffle', 'balanced'], default='balanced',
                    help='Training sampler: regular shuffle or class-balanced sampling')
     p.add_argument('--mask_lambda1', type=float, default=1.0,
                    help='CAM/mask Dice alignment loss weight for Variant B')
@@ -303,7 +303,7 @@ def parse_args():
     p.add_argument('--checkpoint', nargs='+', default=None,
                    help='Checkpoint .pth path(s) for evaluate mode')
     p.add_argument('--backbone_weights', type=str, default=None,
-                   help='Path to pretrained backbone weights, e.g. RadImageNet resnet50.pth '
+                   help='Path to pretrained backbone weights '
                         '(loaded with strict=False before training; ignored in evaluate mode)')
     return p.parse_args()
 

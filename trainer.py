@@ -11,8 +11,8 @@ from losses.losses import LSECLoss
 from metrics.metrics import evaluate_model, aggregate_results
 from sklearn.metrics import f1_score
 
-BACKBONE_LR = 5e-5   # default backbone fine-tune LR after warmup
-HEAD_LR     = 1e-4   # default head LR after warmup
+BACKBONE_LR = 2e-5   # ConvNeXt-Tiny fine-tune LR after warmup
+HEAD_LR     = 5e-5   # head LR after warmup
 
 
 def compute_class_weights(labels, num_classes):
@@ -88,8 +88,8 @@ def make_balanced_sampler(labels, generator=None):
 def run_fold(model, criterion, train_loader, val_loader,
              epochs, device, fold_idx, use_mask_loss=True,
              mixup_prob=0.5, mixup_alpha=0.2,
-             warmup_epochs=5, backbone_lr=BACKBONE_LR,
-             head_lr=HEAD_LR, warmup_lr=1e-3,
+             warmup_epochs=3, backbone_lr=BACKBONE_LR,
+             head_lr=HEAD_LR, warmup_lr=2e-4,
              debug=False):
     """
     2-phase training for a single fold:
@@ -133,6 +133,7 @@ def run_fold(model, criterion, train_loader, val_loader,
             if epochs > WARMUP:
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer, T_max=epochs - WARMUP)
+            patience = 0  # give phase 2 a fresh patience budget
 
         # ── Train epoch ──────────────────────────────────────────
         model.train()
@@ -215,8 +216,8 @@ def train_and_evaluate(train_val, test_set, folds,
                        aug='default', label_smoothing=0.1,
                        mixup_prob=0.5, mixup_alpha=0.2,
                        class_weight_mode='inverse', dropout=0.3,
-                       warmup_epochs=5, backbone_lr=BACKBONE_LR,
-                       head_lr=HEAD_LR, warmup_lr=1e-3,
+                       warmup_epochs=3, backbone_lr=BACKBONE_LR,
+                       head_lr=HEAD_LR, warmup_lr=2e-4,
                        calibrate_logits=False,
                        sampler='shuffle',
                        mask_lambda1=1.0, mask_lambda2=0.3,
@@ -332,7 +333,7 @@ def train_and_evaluate(train_val, test_set, folds,
             if acc < XAI_ACC_THRESHOLD:
                 print(f"\n  {'!'*56}")
                 print(f"  [WARNING] Fold 0 accuracy = {acc:.4f} < {XAI_ACC_THRESHOLD}")
-                print(f"  XAI metrics skipped. Consider debugging before running more folds.")
+                print("  XAI metrics skipped. Consider debugging before running more folds.")
                 print(f"  {'!'*56}\n")
             else:
                 pg_str = f'{pg:.4f}' if pg is not None else 'N/A'
