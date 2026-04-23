@@ -152,17 +152,17 @@ class PairedTransform:
         self.mode = mode
         self.aug = aug
         self.color_jitter = transforms.ColorJitter(
-            brightness=0.3 if aug == 'default' else 0.15,
-            contrast=0.3 if aug == 'default' else 0.15,
-            saturation=0.1 if aug == 'default' else 0.0,
+            brightness=0.4 if aug == 'default' else 0.2,
+            contrast=0.4 if aug == 'default' else 0.2,
+            saturation=0.15 if aug == 'default' else 0.0,
         )
 
     def __call__(self, img, mask):
         # img: PIL RGB  |  mask: PIL L
         if self.mode == 'train' and self.aug != 'none':
-            scale = (0.8, 1.0) if self.aug == 'default' else (0.9, 1.0)
+            scale = (0.75, 1.0) if self.aug == 'default' else (0.85, 1.0)
             ratio = (0.85, 1.15) if self.aug == 'default' else (0.95, 1.05)
-            angle_max = 15 if self.aug == 'default' else 10
+            angle_max = 20 if self.aug == 'default' else 15
 
             i, j, h, w = transforms.RandomResizedCrop.get_params(
                 img, scale=scale, ratio=ratio

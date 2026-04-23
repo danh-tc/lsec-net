@@ -54,7 +54,7 @@ def mode_debug(args, device):
     file_list = build_file_list(args.data_root)
     print(f"Total samples : {len(file_list)}")
 
-    train_val, test_set, folds = make_splits(file_list)
+    train_val, _, folds = make_splits(file_list)
 
     train_data = [train_val[i] for i in folds[0][0]]
     val_data   = [train_val[i] for i in folds[0][1]]
@@ -69,7 +69,7 @@ def mode_debug(args, device):
     train_labels  = [x[2] for x in train_data]
     class_weights = compute_class_weights(train_labels, 3).to(device)
 
-    model     = LSECNet(num_classes=3).to(device)
+    model     = LSECNet(num_classes=3, weights_path=args.backbone_weights).to(device)
     criterion = LSECLoss(lambda1=1.0, lambda2=0.3, class_weights=class_weights)
 
     # Sanity check: shapes + NaN
@@ -149,6 +149,7 @@ def mode_train(args, device):
             mask_lambda1=args.mask_lambda1,
             mask_lambda2=args.mask_lambda2,
             seed=args.seed,
+            backbone_weights=args.backbone_weights,
         )
 
     # ── Variant B: LSEC-Net (L_cls + L_align + L_out) ───────────
@@ -181,6 +182,7 @@ def mode_train(args, device):
             mask_lambda1=args.mask_lambda1,
             mask_lambda2=args.mask_lambda2,
             seed=args.seed,
+            backbone_weights=args.backbone_weights,
         )
 
     # ── Final comparison (only meaningful when both ran + multiple folds) ──
@@ -278,7 +280,7 @@ def parse_args():
                    help='Beta distribution alpha for mixup')
     p.add_argument('--class_weight_mode', choices=['inverse', 'none'], default='inverse',
                    help='Class weighting strategy for CrossEntropy')
-    p.add_argument('--dropout', type=float, default=0.3,
+    p.add_argument('--dropout', type=float, default=0.4,
                    help='Classifier dropout probability')
     p.add_argument('--warmup_epochs', type=int, default=5,
                    help='Frozen-backbone warmup epochs')
@@ -300,6 +302,9 @@ def parse_args():
                    help='Random seed for splits, augmentation, dataloader workers, and torch')
     p.add_argument('--checkpoint', nargs='+', default=None,
                    help='Checkpoint .pth path(s) for evaluate mode')
+    p.add_argument('--backbone_weights', type=str, default=None,
+                   help='Path to pretrained backbone weights, e.g. RadImageNet resnet50.pth '
+                        '(loaded with strict=False before training; ignored in evaluate mode)')
     return p.parse_args()
 
 

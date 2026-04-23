@@ -1,6 +1,6 @@
 # LSEC-Net
 
-EfficientNet-B3 + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
+ResNet50 + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
 
 So sánh **Variant A** (GradCAM baseline) vs **Variant B** (LSEC-Net proposed) trên 6 metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio.
 
@@ -192,6 +192,7 @@ python main.py \
 | `--folds` | `1` | Số folds cần chạy (1–5) |
 | `--epochs` | `40` | Số epochs tối đa mỗi fold |
 | `--batch_size` | `32` | Batch size |
+| `--backbone_weights` | `None` | Path tới pretrained backbone `.pth` (e.g. RadImageNet) |
 | `--checkpoint` | `None` | Path checkpoint(s) cho evaluate mode |
 
 Nếu CUDA báo GPU bận hoặc không khả dụng, có thể test flow bằng CPU:
@@ -215,6 +216,35 @@ CUDA_VISIBLE_DEVICES="" python main.py \
         ↓
 4. evaluate --checkpoint proposed_fold*.pth  → report cuối
 ```
+
+---
+
+## Backbone
+
+Mặc định dùng **ResNet50** pretrained trên ImageNet (via `timm`).  
+Feature map output: `[B, 2048, 7, 7]` với input 224×224.
+
+### RadImageNet (khuyến nghị)
+
+Để tăng domain fit, có thể khởi tạo backbone từ **RadImageNet** — ResNet50 pretrained trên 1.35M ảnh CT/MRI/siêu âm, giúp tăng ~4% AUC trên breast ultrasound so với ImageNet.
+
+**Tải weights:**
+```
+https://github.com/BMEII-AI/RadImageNet
+```
+Weights gốc ở định dạng Keras `.h5`. Convert sang PyTorch `.pth` bằng script trong repo đó, sau đó truyền vào `--backbone_weights`.
+
+**Chạy với RadImageNet:**
+```bash
+python main.py \
+    --mode train \
+    --data_root ./archive/Dataset_BUSI_with_GT \
+    --backbone_weights /path/to/RadImageNet_resnet50.pth \
+    --folds 1
+```
+
+`--backbone_weights` chỉ được dùng lúc **khởi tạo trước khi train** (load với `strict=False`).  
+Ở `evaluate` mode, weights được load hoàn toàn từ checkpoint — `--backbone_weights` bị bỏ qua.
 
 ---
 

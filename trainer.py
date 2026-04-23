@@ -113,7 +113,7 @@ def run_fold(model, criterion, train_loader, val_loader,
     # Phase 1: freeze backbone, train head only
     for p in backbone_params:
         p.requires_grad = False
-    optimizer = torch.optim.AdamW(head_params, lr=warmup_lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(head_params, lr=warmup_lr, weight_decay=1e-3)
     scheduler = None
 
     best_f1, best_state, patience = 0.0, None, 0
@@ -127,7 +127,7 @@ def run_fold(model, criterion, train_loader, val_loader,
                 p.requires_grad = True
             # add_param_group preserves head Adam momentum accumulated so far
             optimizer.add_param_group(
-                {'params': backbone_params, 'lr': backbone_lr, 'weight_decay': 1e-4}
+                {'params': backbone_params, 'lr': backbone_lr, 'weight_decay': 1e-3}
             )
             optimizer.param_groups[0]['lr'] = head_lr
             if epochs > WARMUP:
@@ -221,6 +221,7 @@ def train_and_evaluate(train_val, test_set, folds,
                        sampler='shuffle',
                        mask_lambda1=1.0, mask_lambda2=0.3,
                        seed=42,
+                       backbone_weights=None,
                        debug=False):
     """
     Runs n_folds_to_run folds for one variant (baseline or proposed).
@@ -244,7 +245,7 @@ def train_and_evaluate(train_val, test_set, folds,
         if class_weight_mode == 'inverse':
             class_weights = compute_class_weights(train_labels, 3).to(device)
 
-        model     = LSECNet(num_classes=3, dropout=dropout).to(device)
+        model     = LSECNet(num_classes=3, dropout=dropout, weights_path=backbone_weights).to(device)
         criterion = LSECLoss(
             lambda1=mask_lambda1 if use_mask_loss else 0.0,
             lambda2=mask_lambda2 if use_mask_loss else 0.0,
