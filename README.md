@@ -73,6 +73,7 @@ train       → train model + eval classification sau mỗi fold
 evaluate    → load checkpoint → eval classification (không cần retrain)
 xai         → load checkpoint → XAI metrics trên BUSI test set
 xai-busbra  → load checkpoint → XAI metrics trên BUS-BRA (cross-dataset)
+visualize.py → tạo hình so sánh CAM baseline vs LSEC-Net cho báo cáo
 ```
 
 **Workflow chuẩn:**
@@ -217,6 +218,34 @@ python main.py \
     --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
     --busbra_data_root ./archive/BUSBRA/BUSBRA \
     --pathology malignant
+```
+
+---
+
+### 6. `visualize.py` — Vẽ heatmap so sánh
+
+Tạo figure gồm 4 cột: ảnh gốc + GT mask, baseline CAM, LSEC-Net CAM, và chênh lệch CAM.  
+Script tự dùng `splits.json` trong thư mục checkpoint nếu có, nên hình lấy đúng test set lúc train.
+
+```bash
+python visualize.py \
+    --baseline_checkpoint runs/<run>/baseline_fold0.pth \
+    --proposed_checkpoint runs/<run>/proposed_fold0.pth \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
+    --output_dir runs/<run>/visualizations/fold0 \
+    --num_samples 6 \
+    --class_filter non-normal
+```
+
+Lọc riêng class:
+
+```bash
+python visualize.py \
+    --baseline_checkpoint runs/<run>/baseline_fold0.pth \
+    --proposed_checkpoint runs/<run>/proposed_fold0.pth \
+    --output_dir runs/<run>/visualizations/malignant_fold0 \
+    --num_samples 6 \
+    --class_filter malignant
 ```
 
 ---
