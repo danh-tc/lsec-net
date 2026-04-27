@@ -2,7 +2,7 @@
 
 ConvNeXt-Tiny + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
 
-So sánh **Variant A** (CAM baseline) vs **Variant B** (LSEC-Net proposed) trên 6 metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio.
+So sánh **Variant A** (CAM baseline) vs **Variant B** (LSEC-Net proposed) trên classification metrics và XAI metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio, AUPRC.
 
 ---
 
@@ -144,6 +144,7 @@ auc                    0.9410±0.0150    0.9560±0.0130
 pointing_game          0.6200±0.0480    0.7350±0.0390  [5/5]
 soft_iou               0.3450±0.0550    0.5210±0.0490  [5/5]
 inside_ratio           0.5630±0.0640    0.7580±0.0560  [5/5]
+auprc                  0.4100±0.0500    0.6500±0.0400  [5/5]
 ```
 
 ---
@@ -173,7 +174,7 @@ python main.py \
 
 ### 4. `xai` — Đánh giá XAI trên BUSI test set
 
-Tính Pointing Game / Soft IoU / Inside Ratio trên **cùng test set lúc train**.
+Tính Pointing Game / Soft IoU / Inside Ratio / AUPRC trên **cùng test set lúc train**.
 
 - Nếu `splits.json` tồn tại trong cùng thư mục với checkpoint → load trực tiếp (đảm bảo exact same test set).
 - Nếu không có → fallback re-split với `--seed` (cần `--data_root`).
@@ -190,6 +191,13 @@ python main.py \
     --mode xai \
     --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth
+```
+
+Kết quả được lưu cạnh checkpoint:
+
+```
+runs/<run>/xai_busi_results.json
+runs/<run>/xai_busi_results.csv
 ```
 
 ---
@@ -218,6 +226,13 @@ python main.py \
     --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
     --busbra_data_root ./archive/BUSBRA/BUSBRA \
     --pathology malignant
+```
+
+Kết quả được lưu cạnh checkpoint:
+
+```
+runs/<run>/xai_busbra_results.json
+runs/<run>/xai_busbra_results.csv
 ```
 
 ---

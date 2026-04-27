@@ -30,6 +30,7 @@ Usage:
 """
 
 import argparse
+import csv
 from datetime import datetime
 import json
 import os
@@ -274,6 +275,57 @@ def _load_test_set(ckpt_path, args):
     return test_set
 
 
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, 'item'):
+        return value.item()
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return value
+
+
+def _write_xai_outputs(prefix, checkpoint_results):
+    if not checkpoint_results:
+        return
+
+    first_ckpt = checkpoint_results[0]['checkpoint']
+    output_dir = os.path.dirname(first_ckpt) or '.'
+    os.makedirs(output_dir, exist_ok=True)
+
+    metric_results = [
+        {k: v for k, v in item.items() if k != 'checkpoint'}
+        for item in checkpoint_results
+    ]
+    aggregate = aggregate_results(metric_results) if len(metric_results) > 1 else None
+
+    payload = {
+        'results': checkpoint_results,
+        'aggregate': aggregate,
+    }
+    json_path = os.path.join(output_dir, f'{prefix}_results.json')
+    csv_path = os.path.join(output_dir, f'{prefix}_results.csv')
+
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(_json_safe(payload), f, indent=2)
+
+    fieldnames = ['checkpoint']
+    for item in checkpoint_results:
+        for key in item:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in checkpoint_results:
+            writer.writerow(_json_safe(item))
+
+    print(f"  Results JSON: {json_path}")
+    print(f"  Results CSV : {csv_path}")
+
+
 def mode_xai(args, device):
     print("\n" + "="*50)
     print("  MODE: XAI  (BUSI test set)")
@@ -283,6 +335,7 @@ def mode_xai(args, device):
         raise ValueError("--checkpoint is required for xai mode")
 
     fold_results = []
+    checkpoint_results = []
 
     for ckpt_path in args.checkpoint:
         if not os.path.exists(ckpt_path):
@@ -326,13 +379,16 @@ def mode_xai(args, device):
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  AUPRC         : {xai['auprc']:.4f}")
         fold_results.append(xai)
+        checkpoint_results.append({'checkpoint': ckpt_path, **xai})
 
-    if len(fold_results) > 1:
-        print(f"\n{'='*50}")
-        print(f"  Aggregated across {len(fold_results)} checkpoints")
-        print(f"{'='*50}")
-        aggregate_results(fold_results)
+    if checkpoint_results:
+        if len(fold_results) > 1:
+            print(f"\n{'='*50}")
+            print(f"  Aggregated across {len(fold_results)} checkpoints")
+            print(f"{'='*50}")
+        _write_xai_outputs('xai_busi', checkpoint_results)
 
 
 def mode_xai_busbra(args, device):
@@ -368,6 +424,7 @@ def mode_xai_busbra(args, device):
     print(f"  Pathology  : {pathology_tag}  ({len(dataset)} samples)")
 
     fold_results = []
+    checkpoint_results = []
 
     for ckpt_path in args.checkpoint:
         if not os.path.exists(ckpt_path):
@@ -386,7 +443,9 @@ def mode_xai_busbra(args, device):
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  AUPRC         : {xai['auprc']:.4f}")
         fold_results.append(xai)
+        checkpoint_results.append({'checkpoint': ckpt_path, **xai})
 
     if not fold_results:
         print("\n  No valid checkpoints found.")
@@ -396,7 +455,7 @@ def mode_xai_busbra(args, device):
         print(f"\n{'='*60}")
         print(f"  Aggregated across {len(fold_results)} checkpoints")
         print(f"{'='*60}")
-        aggregate_results(fold_results)
+    _write_xai_outputs('xai_busbra', checkpoint_results)
 
 
 def parse_args():

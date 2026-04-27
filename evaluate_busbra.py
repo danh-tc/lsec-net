@@ -233,6 +233,7 @@ def run(args, device):
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  AUPRC         : {xai['auprc']:.4f}")
 
         fold_results.append(xai)
 

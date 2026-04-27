@@ -12,7 +12,7 @@ import torchvision.transforms.functional as TF
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     mean_absolute_error, mean_squared_error,
-    roc_auc_score, confusion_matrix,
+    roc_auc_score, confusion_matrix, average_precision_score,
 )
 
 from data.dataset import CLASS_NAMES, XAI_ACC_THRESHOLD
@@ -48,12 +48,28 @@ def inside_ratio(cam, mask):
     return (inside / (total + 1e-8)).mean().item()
 
 
+def xai_auprc(cam, mask):
+    """
+    Mean per-image pixel-level AUPRC between continuous CAM scores and binary masks.
+    This avoids choosing a fixed CAM threshold and is robust for small lesions.
+    """
+    scores = cam.view(cam.shape[0], -1).numpy()
+    targets = mask.view(mask.shape[0], -1).numpy().astype(np.uint8)
+    values = []
+    for y_true, y_score in zip(targets, scores):
+        if y_true.sum() == 0:
+            continue
+        values.append(average_precision_score(y_true, y_score))
+    return float(np.mean(values)) if values else float('nan')
+
+
 def compute_xai_metrics(cam, mask):
     cam, mask = cam.detach().cpu(), mask.cpu()
     return {
         'pointing_game': pointing_game(cam, mask),
         'soft_iou':      soft_iou(cam, mask),
         'inside_ratio':  inside_ratio(cam, mask),
+        'auprc':         xai_auprc(cam, mask),
     }
 
 
@@ -150,9 +166,10 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False,
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  AUPRC         : {xai['auprc']:.4f}")
     else:
         print(f"  [XAI SKIP] accuracy {accuracy:.4f} < {xai_min_acc}")
-        xai = {'pointing_game': None, 'soft_iou': None, 'inside_ratio': None}
+        xai = {'pointing_game': None, 'soft_iou': None, 'inside_ratio': None, 'auprc': None}
 
     if save_cm:
         _save_confusion_matrix(model_name, y_true, y_pred, output_dir=output_dir)
@@ -191,7 +208,7 @@ def _save_confusion_matrix(model_name, y_true, y_pred, output_dir=None):
 # Aggregation (across folds)
 # ─────────────────────────────────────────────
 
-XAI_KEYS = ('pointing_game', 'soft_iou', 'inside_ratio')
+XAI_KEYS = ('pointing_game', 'soft_iou', 'inside_ratio', 'auprc')
 
 
 def aggregate_results(fold_results):
@@ -220,7 +237,7 @@ def aggregate_results(fold_results):
 def print_result_table(baseline, proposed):
     """Side-by-side comparison table for baseline vs proposed."""
     metrics = ['accuracy', 'f1_macro', 'auc',
-               'pointing_game', 'soft_iou', 'inside_ratio']
+               'pointing_game', 'soft_iou', 'inside_ratio', 'auprc']
 
     print(f"\n  {'Metric':<22} {'Baseline':>22} {'LSEC-Net (ours)':>22}")
     print('  ' + '-' * 68)
