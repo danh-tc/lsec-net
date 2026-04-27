@@ -358,18 +358,25 @@ def mode_xai(args, device):
 
         model.eval()
         cams, masks = [], []
-        with torch.no_grad():
-            for batch in test_loader:
-                img    = batch['image'].to(device)
-                msk    = batch['mask'].to(device)
-                labels = batch['label'].to(device)
-                non_normal = (labels != 0)
-                if non_normal.any():
+        for batch in test_loader:
+            img    = batch['image'].to(device)
+            msk    = batch['mask'].to(device)
+            labels = batch['label'].to(device)
+            non_normal = (labels != 0)
+            if non_normal.any():
+                if args.cam_method == 'intrinsic':
+                    with torch.no_grad():
+                        logits, feat = model(img)
+                        cam = model.get_explanation(
+                            feat[non_normal], logits[non_normal],
+                            labels[non_normal], method=args.cam_method)
+                else:
+                    model.zero_grad(set_to_none=True)
                     logits, feat = model(img)
-                    preds = logits.argmax(1)
-                    cam = model.get_cam(feat[non_normal], preds[non_normal])
-                    cams.append(cam.cpu())
-                    masks.append(msk[non_normal].cpu())
+                    cam = model.get_explanation(
+                        feat, logits, labels, method=args.cam_method)[non_normal]
+                cams.append(cam.detach().cpu())
+                masks.append(msk[non_normal].detach().cpu())
 
         if not cams:
             print("  [SKIP] No non-normal samples found in test set.")
@@ -381,14 +388,14 @@ def mode_xai(args, device):
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
         print(f"  AUPRC         : {xai['auprc']:.4f}")
         fold_results.append(xai)
-        checkpoint_results.append({'checkpoint': ckpt_path, **xai})
+        checkpoint_results.append({'checkpoint': ckpt_path, 'cam_method': args.cam_method, **xai})
 
     if checkpoint_results:
         if len(fold_results) > 1:
             print(f"\n{'='*50}")
             print(f"  Aggregated across {len(fold_results)} checkpoints")
             print(f"{'='*50}")
-        _write_xai_outputs('xai_busi', checkpoint_results)
+        _write_xai_outputs(f'xai_busi_{args.cam_method}', checkpoint_results)
 
 
 def mode_xai_busbra(args, device):
@@ -439,13 +446,13 @@ def mode_xai_busbra(args, device):
 
         print(f"\n  Checkpoint : {ckpt_path}")
 
-        xai = evaluate_xai(model, loader, device)
+        xai = evaluate_xai(model, loader, device, cam_method=args.cam_method)
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
         print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
         print(f"  AUPRC         : {xai['auprc']:.4f}")
         fold_results.append(xai)
-        checkpoint_results.append({'checkpoint': ckpt_path, **xai})
+        checkpoint_results.append({'checkpoint': ckpt_path, 'cam_method': args.cam_method, **xai})
 
     if not fold_results:
         print("\n  No valid checkpoints found.")
@@ -455,7 +462,7 @@ def mode_xai_busbra(args, device):
         print(f"\n{'='*60}")
         print(f"  Aggregated across {len(fold_results)} checkpoints")
         print(f"{'='*60}")
-    _write_xai_outputs('xai_busbra', checkpoint_results)
+    _write_xai_outputs(f'xai_busbra_{args.cam_method}', checkpoint_results)
 
 
 def parse_args():
@@ -518,6 +525,8 @@ def parse_args():
                    help='Random seed for splits, augmentation, dataloader workers, and torch')
     p.add_argument('--checkpoint', nargs='+', default=None,
                    help='Checkpoint .pth path(s) for evaluate / xai / xai-busbra modes')
+    p.add_argument('--cam_method', choices=['intrinsic', 'gradcam', 'gradcampp'], default='intrinsic',
+                   help='CAM method for xai / xai-busbra modes')
     p.add_argument('--backbone_weights', type=str, default=None,
                    help='Path to pretrained backbone weights (loaded with strict=False before training)')
     # BUS-BRA args (xai-busbra mode)

@@ -131,7 +131,7 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False,
 
             non_normal = (labels != 0)
             if non_normal.any():
-                cam = model.get_cam(feat[non_normal], preds[non_normal])
+                cam = model.get_cam(feat[non_normal], labels[non_normal])
                 xai_cams.append(cam.cpu())
                 xai_masks.append(mask[non_normal].cpu())
 
@@ -213,8 +213,9 @@ XAI_KEYS = ('pointing_game', 'soft_iou', 'inside_ratio', 'auprc')
 
 def aggregate_results(fold_results):
     """Compute mean ± std across folds. XAI keys skip None values."""
-    keys = [k for k in fold_results[0].keys() if k != 'confusion_matrix']
-    agg  = {}
+    keys     = [k for k in fold_results[0].keys() if k != 'confusion_matrix']
+    n_folds  = len(fold_results)
+    agg      = {}
 
     print(f"\n  {'Metric':<22} {'Mean':>10} {'Std':>10}  Folds")
     print('  ' + '-' * 52)
@@ -228,7 +229,7 @@ def aggregate_results(fold_results):
             print(f"  {k:<22}: stored per fold (non-scalar)")
             agg[k] = {'values': vals}
             continue
-        suffix = f'  [{len(vals)}/5]' if k in XAI_KEYS else ''
+        suffix = f'  [{len(vals)}/{n_folds}]' if k in XAI_KEYS else ''
         print(f"  {k:<22}: {np.mean(vals):.4f}  ±{np.std(vals):.4f}{suffix}")
         agg[k] = {'mean': float(np.mean(vals)), 'std': float(np.std(vals))}
     return agg

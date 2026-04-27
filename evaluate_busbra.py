@@ -159,21 +159,27 @@ def download_busbra(download_dir='/workspace'):
 # Evaluation
 # ─────────────────────────────────────────────
 
-def evaluate_xai(model, loader, device):
+def evaluate_xai(model, loader, device, cam_method='intrinsic'):
     model.eval()
     cams, masks = [], []
 
-    with torch.no_grad():
-        for batch in loader:
-            img    = batch['image'].to(device)
-            mask   = batch['mask'].to(device)
-            labels = batch['label'].to(device)
+    for batch in loader:
+        img    = batch['image'].to(device)
+        mask   = batch['mask'].to(device)
+        labels = batch['label'].to(device)
 
+        if cam_method == 'intrinsic':
+            with torch.no_grad():
+                logits, feat = model(img)
+                cam = model.get_explanation(feat, logits, labels, method=cam_method)
+        else:
+            model.zero_grad(set_to_none=True)
             _, feat = model(img)
-            cam = model.get_cam(feat, labels)
+            logits = model.classifier(model.dropout(model.gap(feat).flatten(1)))
+            cam = model.get_explanation(feat, logits, labels, method=cam_method)
 
-            cams.append(cam.cpu())
-            masks.append(mask.cpu())
+        cams.append(cam.detach().cpu())
+        masks.append(mask.detach().cpu())
 
     return compute_xai_metrics(torch.cat(cams), torch.cat(masks))
 
@@ -228,7 +234,7 @@ def run(args, device):
         ckpt_name = os.path.splitext(os.path.basename(ckpt_path))[0]
         print(f"\n  Checkpoint : {ckpt_path}")
 
-        xai = evaluate_xai(model, loader, device)
+        xai = evaluate_xai(model, loader, device, cam_method=args.cam_method)
 
         print(f"  Pointing Game : {xai['pointing_game']:.4f}")
         print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
@@ -287,6 +293,10 @@ def parse_args():
     p.add_argument(
         '--device', default=None,
         help='cuda / cpu (auto-detect if omitted)'
+    )
+    p.add_argument(
+        '--cam_method', choices=['intrinsic', 'gradcam', 'gradcampp'], default='intrinsic',
+        help='CAM method for XAI evaluation'
     )
     return p.parse_args()
 

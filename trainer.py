@@ -27,6 +27,8 @@ def _json_safe(value):
         return [_json_safe(v) for v in value]
     if hasattr(value, 'item'):
         return value.item()
+    if isinstance(value, float) and np.isnan(value):
+        return None
     return value
 
 
@@ -154,7 +156,7 @@ def run_fold(model, criterion, train_loader, val_loader,
 
                 logits, feat   = model(mixed)
                 loss_a, parts_a = criterion(logits, feat, model, labels,  mask)
-                loss_b, parts_b = criterion(logits, feat, model, lab_b,   mask)
+                loss_b, parts_b = criterion(logits, feat, model, lab_b,   mask[idx])
                 loss       = lam * loss_a + (1 - lam) * loss_b
                 loss_parts = {k: lam * parts_a[k] + (1 - lam) * parts_b[k]
                               for k in parts_a}

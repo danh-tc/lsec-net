@@ -49,3 +49,54 @@ class LSECNet(nn.Module):
         mx  = cam.view(B, -1).max(1)[0].view(B, 1, 1)
         cam = (cam - mn) / (mx - mn + 1e-8)
         return F.interpolate(cam.unsqueeze(1), size, mode='bilinear', align_corners=False)
+
+    @staticmethod
+    def _normalize_cam(cam, size=(224, 224)):
+        B = cam.shape[0]
+        mn = cam.view(B, -1).min(1)[0].view(B, 1, 1)
+        mx = cam.view(B, -1).max(1)[0].view(B, 1, 1)
+        cam = (cam - mn) / (mx - mn + 1e-8)
+        return F.interpolate(cam.unsqueeze(1), size, mode='bilinear', align_corners=False)
+
+    def get_grad_cam(self, feat, logits, labels, size=(224, 224)):
+        """
+        Grad-CAM over the returned feature map.
+        labels selects the target class for each sample.
+        """
+        grads = torch.autograd.grad(
+            logits[torch.arange(logits.shape[0], device=logits.device), labels].sum(),
+            feat,
+            retain_graph=True,
+            create_graph=False,
+        )[0]
+        weights = grads.mean(dim=(2, 3), keepdim=True)
+        cam = F.relu((weights * feat).sum(dim=1))
+        return self._normalize_cam(cam, size=size)
+
+    def get_grad_cam_pp(self, feat, logits, labels, size=(224, 224)):
+        """
+        Grad-CAM++ over the returned feature map.
+        Uses the common positive-gradient weighting approximation.
+        """
+        grads = torch.autograd.grad(
+            logits[torch.arange(logits.shape[0], device=logits.device), labels].sum(),
+            feat,
+            retain_graph=True,
+            create_graph=False,
+        )[0]
+        grads2 = grads.pow(2)
+        grads3 = grads2 * grads
+        denom = 2 * grads2 + (feat * grads3).sum(dim=(2, 3), keepdim=True)
+        alpha = grads2 / (denom + 1e-8)
+        weights = (alpha * F.relu(grads)).sum(dim=(2, 3), keepdim=True)
+        cam = F.relu((weights * feat).sum(dim=1))
+        return self._normalize_cam(cam, size=size)
+
+    def get_explanation(self, feat, logits, labels, method='intrinsic', size=(224, 224)):
+        if method == 'intrinsic':
+            return self.get_cam(feat, labels, size=size)
+        if method == 'gradcam':
+            return self.get_grad_cam(feat, logits, labels, size=size)
+        if method == 'gradcampp':
+            return self.get_grad_cam_pp(feat, logits, labels, size=size)
+        raise ValueError(f"Unknown CAM method: {method}")

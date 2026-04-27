@@ -88,14 +88,25 @@ def load_sample(sample):
     return img_tensor, img_np, mask_np, int(label)
 
 
-def predict_cam(model, img_tensor, device):
-    with torch.no_grad():
-        logits, feat = model(img_tensor.to(device))
+def predict_cam(model, img_tensor, device, cam_method):
+    img_tensor = img_tensor.to(device)
+    if cam_method == 'intrinsic':
+        with torch.no_grad():
+            logits, feat = model(img_tensor)
+            probs = torch.softmax(logits, dim=1)
+            pred = int(probs.argmax(dim=1).item())
+            conf = float(probs[0, pred].item())
+            cam = model.get_explanation(
+                feat, logits, torch.tensor([pred], device=device), method=cam_method)
+    else:
+        model.zero_grad(set_to_none=True)
+        logits, feat = model(img_tensor)
         probs = torch.softmax(logits, dim=1)
         pred = int(probs.argmax(dim=1).item())
         conf = float(probs[0, pred].item())
-        cam = model.get_cam(feat, torch.tensor([pred], device=device))
-    return pred, conf, cam.squeeze().cpu().numpy()
+        cam = model.get_explanation(
+            feat, logits, torch.tensor([pred], device=device), method=cam_method)
+    return pred, conf, cam.squeeze().detach().cpu().numpy()
 
 
 def apply_heatmap(img_np, cam_np, alpha=0.5):
@@ -129,10 +140,10 @@ def select_samples(test_set, args):
     return samples[:args.num_samples]
 
 
-def save_comparison(sample, idx, baseline_model, proposed_model, device, output_dir):
+def save_comparison(sample, idx, baseline_model, proposed_model, device, output_dir, cam_method):
     img_tensor, img_np, mask_np, label = load_sample(sample)
-    base_pred, base_conf, base_cam = predict_cam(baseline_model, img_tensor, device)
-    prop_pred, prop_conf, prop_cam = predict_cam(proposed_model, img_tensor, device)
+    base_pred, base_conf, base_cam = predict_cam(baseline_model, img_tensor, device, cam_method)
+    prop_pred, prop_conf, prop_cam = predict_cam(proposed_model, img_tensor, device, cam_method)
     diff = prop_cam - base_cam
 
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
@@ -143,11 +154,11 @@ def save_comparison(sample, idx, baseline_model, proposed_model, device, output_
 
     axes[1].imshow(apply_heatmap(img_np, base_cam))
     draw_mask_contour(axes[1], mask_np)
-    axes[1].set_title(f"Baseline CAM\npred={CLASS_NAMES[base_pred]} ({base_conf:.2f})")
+    axes[1].set_title(f"Baseline {cam_method}\npred={CLASS_NAMES[base_pred]} ({base_conf:.2f})")
 
     axes[2].imshow(apply_heatmap(img_np, prop_cam))
     draw_mask_contour(axes[2], mask_np)
-    axes[2].set_title(f"LSEC-Net CAM\npred={CLASS_NAMES[prop_pred]} ({prop_conf:.2f})")
+    axes[2].set_title(f"LSEC-Net {cam_method}\npred={CLASS_NAMES[prop_pred]} ({prop_conf:.2f})")
 
     im = axes[3].imshow(diff, cmap='RdBu_r', vmin=-1, vmax=1)
     draw_mask_contour(axes[3], mask_np, color='black')
@@ -159,7 +170,7 @@ def save_comparison(sample, idx, baseline_model, proposed_model, device, output_
 
     img_name = os.path.splitext(os.path.basename(sample[0]))[0]
     safe_name = img_name.replace(' ', '_').replace('(', '').replace(')', '')
-    out_path = os.path.join(output_dir, f"cam_compare_{idx:02d}_{safe_name}.png")
+    out_path = os.path.join(output_dir, f"{cam_method}_compare_{idx:02d}_{safe_name}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
@@ -184,6 +195,8 @@ def parse_args():
     parser.add_argument('--random', action='store_true', help='Randomly sample instead of taking first matches')
     parser.add_argument('--seed', type=int, default=42, help='Seed for split fallback and random sampling')
     parser.add_argument('--device', default=None, help='cuda / cpu. Auto-detect if omitted')
+    parser.add_argument('--cam_method', choices=['intrinsic', 'gradcam', 'gradcampp'],
+                        default='intrinsic', help='CAM method to visualize')
     return parser.parse_args()
 
 
@@ -206,7 +219,8 @@ def main():
     saved = []
     for idx, sample in enumerate(samples):
         out_path = save_comparison(
-            sample, idx, baseline_model, proposed_model, device, args.output_dir
+            sample, idx, baseline_model, proposed_model, device, args.output_dir,
+            args.cam_method,
         )
         saved.append(out_path)
         print(f"Saved: {out_path}")

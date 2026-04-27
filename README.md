@@ -175,6 +175,7 @@ python main.py \
 ### 4. `xai` — Đánh giá XAI trên BUSI test set
 
 Tính Pointing Game / Soft IoU / Inside Ratio / AUPRC trên **cùng test set lúc train**.
+Hỗ trợ 3 cách sinh heatmap: `intrinsic` (mặc định), `gradcam`, `gradcampp`.
 
 - Nếu `splits.json` tồn tại trong cùng thư mục với checkpoint → load trực tiếp (đảm bảo exact same test set).
 - Nếu không có → fallback re-split với `--seed` (cần `--data_root`).
@@ -193,11 +194,28 @@ python main.py \
     --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth
 ```
 
+Chạy Grad-CAM hoặc Grad-CAM++:
+
+```bash
+python main.py \
+    --mode xai \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
+    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
+    --cam_method gradcam
+
+python main.py \
+    --mode xai \
+    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
+    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
+    --cam_method gradcampp \
+    --batch_size 8
+```
+
 Kết quả được lưu cạnh checkpoint:
 
 ```
-runs/<run>/xai_busi_results.json
-runs/<run>/xai_busi_results.csv
+runs/<run>/xai_busi_<cam_method>_results.json
+runs/<run>/xai_busi_<cam_method>_results.csv
 ```
 
 ---
@@ -228,11 +246,22 @@ python main.py \
     --pathology malignant
 ```
 
+Với Grad-CAM++ trên BUS-BRA nên dùng batch nhỏ để tránh hết VRAM:
+
+```bash
+python main.py \
+    --mode xai-busbra \
+    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
+    --busbra_data_root ./archive/BUSBRA/BUSBRA \
+    --cam_method gradcampp \
+    --batch_size 2
+```
+
 Kết quả được lưu cạnh checkpoint:
 
 ```
-runs/<run>/xai_busbra_results.json
-runs/<run>/xai_busbra_results.csv
+runs/<run>/xai_busbra_<cam_method>_results.json
+runs/<run>/xai_busbra_<cam_method>_results.csv
 ```
 
 ---
@@ -249,7 +278,8 @@ python visualize.py \
     --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
     --output_dir runs/<run>/visualizations/fold0 \
     --num_samples 6 \
-    --class_filter non-normal
+    --class_filter non-normal \
+    --cam_method intrinsic
 ```
 
 Lọc riêng class:
@@ -277,6 +307,7 @@ python visualize.py \
 | `--batch_size` | `16` | Batch size |
 | `--seed` | `42` | Random seed (splits, aug, torch) |
 | `--tta` | `False` | Test-Time Augmentation |
+| `--cam_method` | `intrinsic` | `intrinsic` / `gradcam` / `gradcampp` cho `xai` và `xai-busbra` |
 
 ### Train
 
