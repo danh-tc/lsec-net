@@ -1,12 +1,32 @@
 """
 LSEC-Net entry point.
 
+Setup:
+  1. Install dependencies:
+       pip install -r requirements.txt
+
+  2. Kaggle credentials (required for --download_dataset / --busbra_download):
+       Place kaggle.json at ~/.kaggle/kaggle.json  (chmod 600)
+       Or set env vars: KAGGLE_USERNAME and KAGGLE_KEY
+
+  3. Download BUSI dataset (one-time):
+       python main.py --mode debug --download_dataset --download_dir ./archive
+       # After download, use: --data_root ./archive/Dataset_BUSI_with_GT
+
+  4. Download BUS-BRA dataset (one-time, for xai-busbra only):
+       python main.py --mode xai-busbra --checkpoint <ckpt.pth> \
+           --busbra_download --busbra_download_dir ./archive
+       # After download, use: --busbra_data_root ./archive/BUSBRA/BUSBRA
+
 Usage:
-  python main.py --mode debug    --data_root ./archive/Dataset_BUSI_with_GT
-  python main.py --mode train    --data_root ./archive/Dataset_BUSI_with_GT --folds 1
-  python main.py --mode train    --data_root ./archive/Dataset_BUSI_with_GT --folds 5
-  python main.py --mode evaluate --data_root ./archive/Dataset_BUSI_with_GT \\
-                 --checkpoint proposed_fold0.pth proposed_fold1.pth ...
+  python main.py --mode debug       --data_root ./archive/Dataset_BUSI_with_GT
+  python main.py --mode train       --data_root ./archive/Dataset_BUSI_with_GT --folds 5
+  python main.py --mode evaluate    --data_root ./archive/Dataset_BUSI_with_GT \
+                                    --checkpoint runs/<run>/proposed_fold0.pth ...
+  python main.py --mode xai         --data_root ./archive/Dataset_BUSI_with_GT \
+                                    --checkpoint runs/<run>/proposed_fold0.pth ...
+  python main.py --mode xai-busbra  --checkpoint runs/<run>/proposed_fold0.pth \
+                                    --busbra_data_root ./archive/BUSBRA/BUSBRA
 """
 
 import argparse
@@ -14,6 +34,7 @@ from datetime import datetime
 import json
 import os
 import random
+import sys
 
 import numpy as np
 import torch
@@ -28,7 +49,9 @@ from data.dataset import (
 )
 from models.lsec_net import LSECNet
 from losses.losses import LSECLoss
-from metrics.metrics import evaluate_model, aggregate_results, print_result_table
+from metrics.metrics import (
+    evaluate_model, aggregate_results, print_result_table, compute_xai_metrics,
+)
 from trainer import train_and_evaluate, run_fold, compute_class_weights
 
 
@@ -42,10 +65,6 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
-# ─────────────────────────────────────────────
-# Mode: debug
-# ─────────────────────────────────────────────
-
 def mode_debug(args, device):
     print("\n" + "="*50)
     print("  MODE: DEBUG  (fold 0, 3 epochs, verbose per-batch)")
@@ -54,7 +73,7 @@ def mode_debug(args, device):
     file_list = build_file_list(args.data_root)
     print(f"Total samples : {len(file_list)}")
 
-    train_val, _, folds = make_splits(file_list)
+    train_val, _, folds = make_splits(file_list, seed=args.seed)
 
     train_data = [train_val[i] for i in folds[0][0]]
     val_data   = [train_val[i] for i in folds[0][1]]
@@ -88,10 +107,6 @@ def mode_debug(args, device):
     print("\n  Pipeline OK.")
 
 
-# ─────────────────────────────────────────────
-# Mode: train
-# ─────────────────────────────────────────────
-
 def mode_train(args, device):
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = args.run_name or (
@@ -112,7 +127,13 @@ def mode_train(args, device):
     file_list = build_file_list(args.data_root)
     print(f"Total samples : {len(file_list)}")
 
-    train_val, test_set, folds = make_splits(file_list)
+    train_val, test_set, folds = make_splits(file_list, seed=args.seed)
+
+    # Save splits so xai mode can reproduce the exact same test set later
+    splits_path = os.path.join(run_dir, 'splits.json')
+    with open(splits_path, 'w', encoding='utf-8') as f:
+        json.dump({'seed': args.seed, 'test_set': [list(x) for x in test_set]}, f, indent=2)
+    print(f"  Splits saved: {splits_path}")
 
     run_a = args.variant in ('A', 'both')
     run_b = args.variant in ('B', 'both')
@@ -122,7 +143,7 @@ def mode_train(args, device):
     # ── Variant A: Baseline (L_cls only) ────────────────────────
     if run_a:
         print("\n" + "★"*50)
-        print("  VARIANT A — GradCAM Baseline  (L_cls only)")
+        print("  VARIANT A — CAM Baseline  (L_cls only)")
         print("★"*50)
         baseline_results = train_and_evaluate(
             train_val, test_set, folds,
@@ -193,20 +214,16 @@ def mode_train(args, device):
         print_result_table(baseline_results, proposed_results)
 
 
-# ─────────────────────────────────────────────
-# Mode: evaluate
-# ─────────────────────────────────────────────
-
 def mode_evaluate(args, device):
     print("\n" + "="*50)
-    print("  MODE: EVALUATE")
+    print("  MODE: EVALUATE  (classification only)")
     print("="*50)
 
     if not args.checkpoint:
         raise ValueError("--checkpoint is required for evaluate mode")
 
     file_list = build_file_list(args.data_root)
-    _, test_set, _ = make_splits(file_list)
+    _, test_set, _ = make_splits(file_list, seed=args.seed)
 
     test_loader = DataLoader(
         BUSIDataset(test_set, get_transforms('val')),
@@ -238,32 +255,172 @@ def mode_evaluate(args, device):
         aggregate_results(fold_results)
 
 
-# ─────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────
+def _load_test_set(ckpt_path, args):
+    """Load test set from splits.json next to checkpoint; fallback to re-split with fixed seed."""
+    ckpt_dir = os.path.dirname(os.path.abspath(ckpt_path))
+    splits_path = os.path.join(ckpt_dir, 'splits.json')
+
+    if os.path.exists(splits_path):
+        with open(splits_path, 'r', encoding='utf-8') as f:
+            splits_data = json.load(f)
+        test_set = [tuple(x) for x in splits_data['test_set']]
+        print(f"  Splits loaded: {splits_path}")
+        return test_set
+
+    print(f"  [WARN] splits.json not found in {ckpt_dir}")
+    print(f"         Fallback: re-split with seed={args.seed} (requires --data_root)")
+    file_list = build_file_list(args.data_root)
+    _, test_set, _ = make_splits(file_list, seed=args.seed)
+    return test_set
+
+
+def mode_xai(args, device):
+    print("\n" + "="*50)
+    print("  MODE: XAI  (BUSI test set)")
+    print("="*50)
+
+    if not args.checkpoint:
+        raise ValueError("--checkpoint is required for xai mode")
+
+    fold_results = []
+
+    for ckpt_path in args.checkpoint:
+        if not os.path.exists(ckpt_path):
+            print(f"  [SKIP] Not found: {ckpt_path}")
+            continue
+
+        test_set = _load_test_set(ckpt_path, args)
+        test_loader = DataLoader(
+            BUSIDataset(test_set, get_transforms('val')),
+            batch_size=args.batch_size, shuffle=False,
+            num_workers=4, pin_memory=True)
+
+        model = LSECNet(num_classes=3).to(device)
+        state = torch.load(ckpt_path, map_location=device)
+        if isinstance(state, dict) and 'state_dict' in state:
+            state = state['state_dict']
+        model.load_state_dict(state)
+
+        print(f"\n  Checkpoint : {ckpt_path}")
+
+        model.eval()
+        cams, masks = [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                img    = batch['image'].to(device)
+                msk    = batch['mask'].to(device)
+                labels = batch['label'].to(device)
+                non_normal = (labels != 0)
+                if non_normal.any():
+                    logits, feat = model(img)
+                    preds = logits.argmax(1)
+                    cam = model.get_cam(feat[non_normal], preds[non_normal])
+                    cams.append(cam.cpu())
+                    masks.append(msk[non_normal].cpu())
+
+        if not cams:
+            print("  [SKIP] No non-normal samples found in test set.")
+            continue
+
+        xai = compute_xai_metrics(torch.cat(cams), torch.cat(masks))
+        print(f"  Pointing Game : {xai['pointing_game']:.4f}")
+        print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
+        print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        fold_results.append(xai)
+
+    if len(fold_results) > 1:
+        print(f"\n{'='*50}")
+        print(f"  Aggregated across {len(fold_results)} checkpoints")
+        print(f"{'='*50}")
+        aggregate_results(fold_results)
+
+
+def mode_xai_busbra(args, device):
+    from evaluate_busbra import BUSBRADataset, download_busbra, evaluate_xai
+
+    print("\n" + "="*60)
+    print("  MODE: XAI-BUSBRA  (cross-dataset, BUS-BRA)")
+    print("="*60)
+
+    if not args.checkpoint:
+        raise ValueError("--checkpoint is required for xai-busbra mode")
+
+    data_root = args.busbra_data_root
+    if data_root is None or not os.path.exists(os.path.join(data_root, 'bus_data.csv')):
+        if args.busbra_download:
+            data_root = download_busbra(args.busbra_download_dir)
+        else:
+            print(
+                "[ERROR] BUS-BRA data not found.\n"
+                f"  Tried: {data_root}\n"
+                "  Pass --busbra_download to auto-download via KaggleHub, or\n"
+                "  pass --busbra_data_root <path> pointing to the folder with bus_data.csv."
+            )
+            sys.exit(1)
+
+    dataset = BUSBRADataset(data_root, pathology=args.pathology)
+    loader  = DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=4, pin_memory=True)
+
+    pathology_tag = args.pathology or 'all'
+    print(f"  Data root  : {data_root}")
+    print(f"  Pathology  : {pathology_tag}  ({len(dataset)} samples)")
+
+    fold_results = []
+
+    for ckpt_path in args.checkpoint:
+        if not os.path.exists(ckpt_path):
+            print(f"  [SKIP] Not found: {ckpt_path}")
+            continue
+
+        model = LSECNet(num_classes=3, pretrained=False).to(device)
+        state = torch.load(ckpt_path, map_location=device)
+        if isinstance(state, dict) and 'state_dict' in state:
+            state = state['state_dict']
+        model.load_state_dict(state)
+
+        print(f"\n  Checkpoint : {ckpt_path}")
+
+        xai = evaluate_xai(model, loader, device)
+        print(f"  Pointing Game : {xai['pointing_game']:.4f}")
+        print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
+        print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        fold_results.append(xai)
+
+    if not fold_results:
+        print("\n  No valid checkpoints found.")
+        sys.exit(1)
+
+    if len(fold_results) > 1:
+        print(f"\n{'='*60}")
+        print(f"  Aggregated across {len(fold_results)} checkpoints")
+        print(f"{'='*60}")
+        aggregate_results(fold_results)
+
 
 def parse_args():
-    p = argparse.ArgumentParser(description='LSEC-Net — train / debug / evaluate')
-    p.add_argument('--mode',       required=True,
-                   choices=['debug', 'train', 'evaluate'])
+    p = argparse.ArgumentParser(description='LSEC-Net — train / debug / evaluate / xai')
+    p.add_argument('--mode', required=True,
+                   choices=['debug', 'train', 'evaluate', 'xai', 'xai-busbra'])
     p.add_argument('--data_root',  default='/workspace/Dataset_BUSI_with_GT',
-                   help='Path to Dataset_BUSI_with_GT directory')
+                   help='Path to Dataset_BUSI_with_GT directory (BUSI modes)')
     p.add_argument('--download_dataset', action='store_true',
                    help='Download BUSI from KaggleHub into --download_dir before running')
     p.add_argument('--download_dir', default='/workspace',
                    help='Directory where KaggleHub should download BUSI')
     p.add_argument('--force_download', action='store_true',
                    help='Force KaggleHub to download BUSI again')
-    p.add_argument('--variant',    choices=['A', 'B', 'both'], default='both',
-                   help='Variant to train: A=baseline (L_cls only), B=proposed (L_cls+L_align+L_out), both=run both')
-    p.add_argument('--tta',        action='store_true',
-                   help='Enable Test-Time Augmentation during final evaluation')
-    p.add_argument('--folds',      type=int, default=1,
-                   help='Folds to run: 1 for early signal, 5 for full CV (train mode)')
-    p.add_argument('--epochs',     type=int, default=50,
+    p.add_argument('--variant', choices=['A', 'B', 'both'], default='both',
+                   help='Variant to train: A=baseline, B=proposed, both=run both')
+    p.add_argument('--tta', action='store_true',
+                   help='Enable Test-Time Augmentation during evaluation')
+    p.add_argument('--folds', type=int, default=1,
+                   help='Folds to run: 1 for early signal, 5 for full CV')
+    p.add_argument('--epochs', type=int, default=50,
                    help='Max epochs per fold')
     p.add_argument('--batch_size', type=int, default=16,
-                   help='Batch size (default 16; BUSI ~400 train samples → stable gradient)')
+                   help='Batch size')
     p.add_argument('--runs_dir', default='runs',
                    help='Parent directory for datetime-named train outputs')
     p.add_argument('--run_name', default=None,
@@ -293,18 +450,26 @@ def parse_args():
     p.add_argument('--calibrate_logits', action='store_true',
                    help='Tune class logit offsets on validation fold before test evaluation')
     p.add_argument('--sampler', choices=['shuffle', 'balanced'], default='balanced',
-                   help='Training sampler: regular shuffle or class-balanced sampling')
+                   help='Training sampler: shuffle or class-balanced')
     p.add_argument('--mask_lambda1', type=float, default=1.0,
-                   help='CAM/mask Dice alignment loss weight for Variant B')
+                   help='CAM/mask Dice alignment loss weight (Variant B)')
     p.add_argument('--mask_lambda2', type=float, default=0.3,
-                   help='CAM outside-mask loss weight for Variant B')
+                   help='CAM outside-mask loss weight (Variant B)')
     p.add_argument('--seed', type=int, default=42,
                    help='Random seed for splits, augmentation, dataloader workers, and torch')
     p.add_argument('--checkpoint', nargs='+', default=None,
-                   help='Checkpoint .pth path(s) for evaluate mode')
+                   help='Checkpoint .pth path(s) for evaluate / xai / xai-busbra modes')
     p.add_argument('--backbone_weights', type=str, default=None,
-                   help='Path to pretrained backbone weights '
-                        '(loaded with strict=False before training; ignored in evaluate mode)')
+                   help='Path to pretrained backbone weights (loaded with strict=False before training)')
+    # BUS-BRA args (xai-busbra mode)
+    p.add_argument('--busbra_data_root', default='./archive/BUSBRA/BUSBRA',
+                   help='Path to BUS-BRA root folder (contains bus_data.csv, Images/, Masks/)')
+    p.add_argument('--busbra_download', action='store_true',
+                   help='Auto-download BUS-BRA via KaggleHub if busbra_data_root is missing')
+    p.add_argument('--busbra_download_dir', default='./archive',
+                   help='Directory for KaggleHub download of BUS-BRA')
+    p.add_argument('--pathology', choices=['benign', 'malignant'], default=None,
+                   help='Filter BUS-BRA by pathology subset (xai-busbra mode only)')
     return p.parse_args()
 
 
@@ -328,6 +493,10 @@ def main():
         mode_train(args, device)
     elif args.mode == 'evaluate':
         mode_evaluate(args, device)
+    elif args.mode == 'xai':
+        mode_xai(args, device)
+    elif args.mode == 'xai-busbra':
+        mode_xai_busbra(args, device)
 
 
 if __name__ == '__main__':

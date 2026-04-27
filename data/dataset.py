@@ -97,6 +97,8 @@ def build_file_list(root):
             ])
 
             if len(mask_files) == 0:
+                if cls_name != 'normal':
+                    print(f"[WARN] No mask found for {img_fname} (class={cls_name}), using zero mask")
                 merged_mask = np.zeros((224, 224), dtype=np.uint8)
             elif len(mask_files) == 1:
                 m = np.array(Image.open(os.path.join(cls_dir, mask_files[0])).convert('L'))

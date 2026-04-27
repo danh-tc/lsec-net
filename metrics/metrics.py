@@ -115,7 +115,7 @@ def evaluate_model(model_name, model, loader, device, save_cm=True, tta=False,
 
             non_normal = (labels != 0)
             if non_normal.any():
-                cam = model.get_cam(feat[non_normal], labels[non_normal])
+                cam = model.get_cam(feat[non_normal], preds[non_normal])
                 xai_cams.append(cam.cpu())
                 xai_masks.append(mask[non_normal].cpu())
 
