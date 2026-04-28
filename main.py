@@ -399,7 +399,7 @@ def mode_xai(args, device):
 
 
 def mode_xai_busbra(args, device):
-    from evaluate_busbra import BUSBRADataset, download_busbra, evaluate_xai
+    from evaluate_busbra import BUSBRADataset, download_busbra, evaluate_xai, evaluate_cls, BUSBRA_CSV_FILENAME
 
     print("\n" + "="*60)
     print("  MODE: XAI-BUSBRA  (cross-dataset, BUS-BRA)")
@@ -409,7 +409,7 @@ def mode_xai_busbra(args, device):
         raise ValueError("--checkpoint is required for xai-busbra mode")
 
     data_root = args.busbra_data_root
-    if data_root is None or not os.path.exists(os.path.join(data_root, 'bus_data.csv')):
+    if data_root is None or not os.path.exists(os.path.join(data_root, BUSBRA_CSV_FILENAME)):
         if args.busbra_download:
             data_root = download_busbra(args.busbra_download_dir)
         else:
@@ -447,12 +447,20 @@ def mode_xai_busbra(args, device):
         print(f"\n  Checkpoint : {ckpt_path}")
 
         xai = evaluate_xai(model, loader, device, cam_method=args.cam_method)
-        print(f"  Pointing Game : {xai['pointing_game']:.4f}")
-        print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
-        print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
-        print(f"  AUPRC         : {xai['auprc']:.4f}")
-        fold_results.append(xai)
-        checkpoint_results.append({'checkpoint': ckpt_path, 'cam_method': args.cam_method, **xai})
+        cls = evaluate_cls(model, loader, device)
+
+        print(f"  [XAI]  Pointing Game : {xai['pointing_game']:.4f}")
+        print(f"  [XAI]  Soft IoU      : {xai['soft_iou']:.4f}")
+        print(f"  [XAI]  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  [XAI]  AUPRC         : {xai['auprc']:.4f}")
+        print(f"  [CLS]  Accuracy      : {cls['cls_accuracy']:.4f}")
+        print(f"  [CLS]  F1 macro      : {cls['cls_f1_macro']:.4f}")
+        print(f"  [CLS]  AUC           : {cls['cls_auc']:.4f}")
+        print(f"  [CLS]  % pred normal : {cls['pct_pred_normal']:.4f}")
+
+        combined = {**xai, **cls}
+        fold_results.append(combined)
+        checkpoint_results.append({'checkpoint': ckpt_path, 'cam_method': args.cam_method, **combined})
 
     if not fold_results:
         print("\n  No valid checkpoints found.")
@@ -462,6 +470,7 @@ def mode_xai_busbra(args, device):
         print(f"\n{'='*60}")
         print(f"  Aggregated across {len(fold_results)} checkpoints")
         print(f"{'='*60}")
+        aggregate_results(fold_results)
     _write_xai_outputs(f'xai_busbra_{args.cam_method}', checkpoint_results)
 
 

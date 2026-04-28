@@ -39,6 +39,7 @@ def find_busi_root(search_root):
 def download_busi_dataset(download_dir='/workspace', force_download=False):
     """
     Downloads BUSI from KaggleHub into download_dir and returns Dataset_BUSI root.
+    KaggleHub cache is redirected to download_dir via KAGGLE_CACHE_FOLDER env var.
     """
     try:
         import kagglehub
@@ -49,20 +50,24 @@ def download_busi_dataset(download_dir='/workspace', force_download=False):
         ) from exc
 
     os.makedirs(download_dir, exist_ok=True)
+    os.environ['KAGGLE_CACHE_FOLDER'] = download_dir
+
     path = kagglehub.dataset_download(
         BUSI_KAGGLE_HANDLE,
-        output_dir=download_dir,
         force_download=force_download,
     )
-    data_root = find_busi_root(path) or find_busi_root(download_dir)
+    print(f"Path to dataset files: {path}")
 
+    data_root = find_busi_root(path)
+    if data_root is None:
+        data_root = find_busi_root(download_dir)
     if data_root is None:
         raise FileNotFoundError(
-            "Downloaded BUSI dataset, but could not find folders: "
-            f"{', '.join(CLASS_MAP.keys())}. KaggleHub path: {path}"
+            f"Downloaded BUSI but could not find benign/malignant/normal folders.\n"
+            f"KaggleHub path: {path}\n"
+            f"Search root  : {download_dir}"
         )
 
-    print(f"Path to dataset files: {path}")
     print(f"BUSI data_root: {data_root}")
     return data_root
 

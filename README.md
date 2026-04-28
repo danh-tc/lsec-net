@@ -2,55 +2,26 @@
 
 ConvNeXt-Tiny + Intrinsic CAM với mask-supervision loss cho bài toán phân loại ung thư vú (BUSI dataset, 3 class).
 
-So sánh **Variant A** (CAM baseline) vs **Variant B** (LSEC-Net proposed) trên classification metrics và XAI metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio, AUPRC.
+So sánh **Variant A** (CAM baseline, chỉ `L_cls`) vs **Variant B** (LSEC-Net proposed, `L_cls + L_align + L_out`) trên classification metrics và XAI metrics: Accuracy, F1, AUC, Pointing Game, Soft IoU, Inside Ratio, AUPRC.
 
 ---
 
 ## Dataset
 
-BUSI — 780 ảnh siêu âm vú  
-`normal (0)` / `benign (1)` / `malignant (2)`
-
+**BUSI** — 780 ảnh siêu âm vú, 3 class:
 ```
-/workspace/busi_data/
-└── Dataset_BUSI_with_GT/
-    ├── benign/       437 images, 454 masks
-    ├── malignant/    210 images, 211 masks
-    └── normal/       133 images, 133 masks
+Dataset_BUSI_with_GT/
+├── benign/       437 images, 454 masks
+├── malignant/    210 images, 211 masks
+└── normal/       133 images, 133 masks
 ```
 
-Dataset có thể được tải tự động từ KaggleHub:
-
-```bash
-python main.py \
-    --mode debug \
-    --download_dataset \
-    --download_dir /workspace/busi_data
+**BUS-BRA** — 1875 ảnh, 2 class (benign/malignant, không có normal):
 ```
-
----
-
-## Cấu trúc project
-
-```
-lsec-net/
-├── data/
-│   ├── __init__.py
-│   └── dataset.py          # build_file_list, make_splits, BUSIDataset, get_transforms
-├── models/
-│   ├── __init__.py
-│   └── lsec_net.py         # LSECNet (ConvNeXt-Tiny + CAM head)
-├── losses/
-│   ├── __init__.py
-│   └── losses.py           # dice_loss, outside_loss, LSECLoss
-├── metrics/
-│   ├── __init__.py
-│   └── metrics.py          # XAI metrics + evaluate_model + aggregate_results
-├── trainer.py              # run_fold, train_and_evaluate
-├── main.py                 # entry point — tất cả modes
-├── evaluate_busbra.py      # standalone script (backward compat, dùng trực tiếp vẫn được)
-├── requirements.txt
-└── README.md
+BUSBRA/
+├── bus_data.csv
+├── Images/
+└── Masks/
 ```
 
 ---
@@ -63,291 +34,277 @@ pip install -r requirements.txt
 
 ---
 
+## Cấu trúc project
+
+```
+lsec-net/
+├── data/
+│   └── dataset.py          # build_file_list, make_splits, BUSIDataset, download_busi_dataset
+├── models/
+│   └── lsec_net.py         # LSECNet (ConvNeXt-Tiny + CAM head)
+├── losses/
+│   └── losses.py           # dice_loss, outside_loss, LSECLoss
+├── metrics/
+│   └── metrics.py          # XAI metrics + evaluate_model + aggregate_results
+├── trainer.py              # run_fold, train_and_evaluate
+├── main.py                 # entry point — tất cả modes
+├── evaluate_busbra.py      # BUS-BRA dataset + XAI + classification eval
+├── visualize.py            # CAM comparison figures
+├── plot_history.py         # training curves + paired t-test
+└── requirements.txt
+```
+
+---
+
 ## Modes
 
-Tất cả modes đều chạy qua `main.py` với flag `--mode`:
-
 ```
-debug       → kiểm tra pipeline nhanh
-train       → train model + eval classification sau mỗi fold
-evaluate    → load checkpoint → eval classification (không cần retrain)
+debug       → kiểm tra pipeline nhanh (forward pass + 3 epochs)
+train       → train 5-fold CV, lưu checkpoint + results
+evaluate    → load checkpoint → classification metrics
 xai         → load checkpoint → XAI metrics trên BUSI test set
-xai-busbra  → load checkpoint → XAI metrics trên BUS-BRA (cross-dataset)
-visualize.py → tạo hình so sánh CAM baseline vs LSEC-Net cho báo cáo
-```
-
-**Workflow chuẩn:**
-
-```
-debug → train --folds 1 → train --folds 5 → xai → xai-busbra
-                                           └──→ evaluate (nếu cần)
+xai-busbra  → load checkpoint → XAI + classification trên BUS-BRA (cross-dataset)
 ```
 
 ---
 
-### 1. `debug` — Kiểm tra pipeline
+## Workflow đầy đủ để lấy data cho báo cáo
 
-Chạy fold 0, 3 epochs, in loss từng batch. Dùng để xác nhận forward pass OK trước khi train thật.
+### Setup Kaggle API (cần cho download tự động)
 
 ```bash
+mkdir -p ~/.kaggle
+# Tạo file từ kaggle.com → Account → Create New API Token
+echo '{"username":"YOUR_USERNAME","key":"YOUR_API_KEY"}' > ~/.kaggle/kaggle.json
+chmod 600 ~/.kaggle/kaggle.json
+```
+
+### 1. Debug — kiểm tra pipeline
+
+```bash
+# Download BUSI + chạy debug cùng lúc
 python main.py \
     --mode debug \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT
+    --download_dataset \
+    --download_dir /workspace/data
 ```
 
----
+`--download_dataset` tải BUSI vào `/workspace/data` và tự cập nhật `--data_root`.  
+Nếu thấy `Pipeline OK` → tiếp tục.
 
-### 2. `train` — Train model
-
-Chạy K-fold CV cho Variant A/B. Eval classification tự động sau mỗi fold.  
-`splits.json` được lưu trong run directory để các mode `xai` / `xai-busbra` dùng lại đúng test set.
-
-**Bước 1 — Early signal (fold 0):**
+### 2. Train 5-fold, cả 2 variants
 
 ```bash
 python main.py \
     --mode train \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --folds 1
+    --data_root /workspace/data/Dataset_BUSI_with_GT \
+    --folds 5 \
+    --variant both \
+    --epochs 50 \
+    --run_name final_run
 ```
 
-Nếu `accuracy >= 0.88` sau fold 0 → tiếp tục bước 2.
-
-**Bước 2 — Full 5-fold CV:**
+Output lưu vào `runs/final_run/`. Đặt biến môi trường để dùng lại:
 
 ```bash
-python main.py \
-    --mode train \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --folds 5
+RUN=runs/final_run
+DATA=/workspace/data/Dataset_BUSI_with_GT
 ```
 
-**Output:**
-```
-runs/<run_name>/
-├── args.json
-├── splits.json                       ← test set full tuples (path, mask, label) dùng bởi xai mode
-├── baseline_fold0.pth ... fold4.pth
-├── proposed_fold0.pth  ... fold4.pth
-├── baseline_fold_results.json
-├── proposed_fold_results.json
-└── Confusion_*.png
-```
-
-**Comparison table cuối (khi `--variant both --folds 5`):**
-```
-Metric                       Baseline         LSEC-Net (ours)
-────────────────────────────────────────────────────────────
-accuracy               0.8800±0.0210    0.8980±0.0180
-f1_macro               0.8320±0.0290    0.8610±0.0250
-auc                    0.9410±0.0150    0.9560±0.0130
-pointing_game          0.6200±0.0480    0.7350±0.0390  [5/5]
-soft_iou               0.3450±0.0550    0.5210±0.0490  [5/5]
-inside_ratio           0.5630±0.0640    0.7580±0.0560  [5/5]
-auprc                  0.4100±0.0500    0.6500±0.0400  [5/5]
-```
-
----
-
-### 3. `evaluate` — Đánh giá classification từ checkpoint
-
-Load checkpoint đã có, evaluate **classification only** trên BUSI test set.  
-Dùng khi muốn re-evaluate checkpoint trên máy khác hoặc sau khi tune xong.
+### 3. XAI trên BUSI test set
 
 ```bash
-# 1 checkpoint
-python main.py \
-    --mode evaluate \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold0.pth
+# Baseline
+python main.py --mode xai --data_root $DATA \
+    --checkpoint \
+        $RUN/baseline_fold0.pth \
+        $RUN/baseline_fold1.pth \
+        $RUN/baseline_fold2.pth \
+        $RUN/baseline_fold3.pth \
+        $RUN/baseline_fold4.pth
 
-# Nhiều checkpoint → aggregate mean ± std
-python main.py \
-    --mode evaluate \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth
+# Proposed
+python main.py --mode xai --data_root $DATA \
+    --checkpoint \
+        $RUN/proposed_fold0.pth \
+        $RUN/proposed_fold1.pth \
+        $RUN/proposed_fold2.pth \
+        $RUN/proposed_fold3.pth \
+        $RUN/proposed_fold4.pth
 ```
 
-**Output:** Accuracy / F1 / AUC / Confusion matrix PNG.
+Kết quả lưu cạnh checkpoint:
+```
+runs/final_run/xai_busi_intrinsic_results.json
+runs/final_run/xai_busi_intrinsic_results.csv
+```
 
----
-
-### 4. `xai` — Đánh giá XAI trên BUSI test set
-
-Tính Pointing Game / Soft IoU / Inside Ratio / AUPRC trên **cùng test set lúc train**.
-Hỗ trợ 3 cách sinh heatmap: `intrinsic` (mặc định), `gradcam`, `gradcampp`.
-
-- Nếu `splits.json` tồn tại trong cùng thư mục với checkpoint → load trực tiếp (đảm bảo exact same test set).
-- Nếu không có → fallback re-split với `--seed` (cần `--data_root`).
+### 4. BUS-BRA — XAI + Classification (cross-dataset)
 
 ```bash
-# 1 checkpoint
-python main.py \
-    --mode xai \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold0.pth
-
-# Nhiều checkpoint → aggregate
-python main.py \
-    --mode xai \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth
-```
-
-Chạy Grad-CAM hoặc Grad-CAM++:
-
-```bash
-python main.py \
-    --mode xai \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
-    --cam_method gradcam
-
-python main.py \
-    --mode xai \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
-    --cam_method gradcampp \
-    --batch_size 8
-```
-
-Kết quả được lưu cạnh checkpoint:
-
-```
-runs/<run>/xai_busi_<cam_method>_results.json
-runs/<run>/xai_busi_<cam_method>_results.csv
-```
-
----
-
-### 5. `xai-busbra` — Cross-dataset XAI trên BUS-BRA
-
-Inference model trained trên BUSI, evaluate XAI localization trên **BUS-BRA** (1875 ảnh, benign/malignant). Không cần BUSI data hay splits.
-
-```bash
-# Data đã có sẵn
-python main.py \
-    --mode xai-busbra \
-    --checkpoint runs/<run>/proposed_fold0.pth \
-    --busbra_data_root ./archive/BUSBRA/BUSBRA
-
-# Auto-download qua KaggleHub
-python main.py \
-    --mode xai-busbra \
-    --checkpoint runs/<run>/proposed_fold0.pth \
+# Download BUS-BRA lần đầu (bỏ --busbra_download những lần sau)
+python main.py --mode xai-busbra \
     --busbra_download \
-    --busbra_download_dir ./archive
+    --busbra_download_dir /workspace/data \
+    --checkpoint $RUN/proposed_fold0.pth
 
-# Nhiều checkpoint + filter pathology
-python main.py \
-    --mode xai-busbra \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
-    --busbra_data_root ./archive/BUSBRA/BUSBRA \
-    --pathology malignant
+# Đặt biến sau khi biết path (in ra trong log: "BUS-BRA root found: ...")
+BUSBRA=/workspace/data/<path-in-log>
+
+# Baseline — tất cả folds
+python main.py --mode xai-busbra --busbra_data_root $BUSBRA \
+    --checkpoint \
+        $RUN/baseline_fold0.pth \
+        $RUN/baseline_fold1.pth \
+        $RUN/baseline_fold2.pth \
+        $RUN/baseline_fold3.pth \
+        $RUN/baseline_fold4.pth
+
+# Proposed — tất cả folds
+python main.py --mode xai-busbra --busbra_data_root $BUSBRA \
+    --checkpoint \
+        $RUN/proposed_fold0.pth \
+        $RUN/proposed_fold1.pth \
+        $RUN/proposed_fold2.pth \
+        $RUN/proposed_fold3.pth \
+        $RUN/proposed_fold4.pth
 ```
 
-Với Grad-CAM++ trên BUS-BRA nên dùng batch nhỏ để tránh hết VRAM:
+Output mỗi checkpoint in:
+```
+[XAI]  Pointing Game : 0.xxxx
+[XAI]  Soft IoU      : 0.xxxx
+[XAI]  Inside Ratio  : 0.xxxx
+[XAI]  AUPRC         : 0.xxxx
+[CLS]  Accuracy      : 0.xxxx
+[CLS]  F1 macro      : 0.xxxx   ← macro over benign/malignant (2 class)
+[CLS]  AUC           : 0.xxxx   ← OvR benign vs malignant
+[CLS]  % pred normal : 0.xxxx   ← cross-domain diagnostic
+```
+
+Kết quả lưu cạnh checkpoint:
+```
+runs/final_run/xai_busbra_intrinsic_results.json
+runs/final_run/xai_busbra_intrinsic_results.csv
+```
+
+### 5. Per-class BUS-BRA (benign vs malignant riêng)
 
 ```bash
-python main.py \
-    --mode xai-busbra \
-    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
-    --busbra_data_root ./archive/BUSBRA/BUSBRA \
-    --cam_method gradcampp \
-    --batch_size 2
+# Proposed — benign only
+python main.py --mode xai-busbra --busbra_data_root $BUSBRA \
+    --pathology benign \
+    --checkpoint \
+        $RUN/proposed_fold0.pth \
+        $RUN/proposed_fold1.pth \
+        $RUN/proposed_fold2.pth \
+        $RUN/proposed_fold3.pth \
+        $RUN/proposed_fold4.pth
+
+# Proposed — malignant only
+python main.py --mode xai-busbra --busbra_data_root $BUSBRA \
+    --pathology malignant \
+    --checkpoint \
+        $RUN/proposed_fold0.pth \
+        $RUN/proposed_fold1.pth \
+        $RUN/proposed_fold2.pth \
+        $RUN/proposed_fold3.pth \
+        $RUN/proposed_fold4.pth
 ```
 
-Kết quả được lưu cạnh checkpoint:
-
-```
-runs/<run>/xai_busbra_<cam_method>_results.json
-runs/<run>/xai_busbra_<cam_method>_results.csv
-```
-
----
-
-### 6. `visualize.py` — Vẽ heatmap so sánh
-
-Tạo figure gồm 4 cột: ảnh gốc + GT mask, baseline CAM, LSEC-Net CAM, và chênh lệch CAM.  
-Script tự dùng `splits.json` trong thư mục checkpoint nếu có, nên hình lấy đúng test set lúc train.
+### 6. CAM comparison figures
 
 ```bash
+# Non-normal samples (benign + malignant)
 python visualize.py \
-    --baseline_checkpoint runs/<run>/baseline_fold0.pth \
-    --proposed_checkpoint runs/<run>/proposed_fold0.pth \
-    --data_root /workspace/busi_data/Dataset_BUSI_with_GT \
-    --output_dir runs/<run>/visualizations/fold0 \
+    --baseline_checkpoint $RUN/baseline_fold0.pth \
+    --proposed_checkpoint $RUN/proposed_fold0.pth \
+    --data_root $DATA \
+    --output_dir $RUN/visualizations \
     --num_samples 6 \
-    --class_filter non-normal \
-    --cam_method intrinsic
-```
+    --class_filter non-normal
 
-Lọc riêng class:
-
-```bash
+# Malignant only (thường compelling hơn cho báo cáo)
 python visualize.py \
-    --baseline_checkpoint runs/<run>/baseline_fold0.pth \
-    --proposed_checkpoint runs/<run>/proposed_fold0.pth \
-    --output_dir runs/<run>/visualizations/malignant_fold0 \
+    --baseline_checkpoint $RUN/baseline_fold0.pth \
+    --proposed_checkpoint $RUN/proposed_fold0.pth \
+    --data_root $DATA \
+    --output_dir $RUN/visualizations/malignant \
     --num_samples 6 \
     --class_filter malignant
 ```
 
+Output: `runs/final_run/visualizations/intrinsic_compare_XX_<name>.png`
+
+### 7. Training curves
+
+```bash
+python plot_history.py curves --run_dir $RUN
+```
+
+Output: `runs/final_run/plots/training_curves.png`
+
+### 8. Paired t-test (statistical significance)
+
+```bash
+python plot_history.py stats --run_dir $RUN
+```
+
+Output in ra terminal:
+```
+  Metric               Base mean  Prop mean     Diff    p-value  Sig?
+  [XAI] pointing_game     0.xxxx     0.xxxx   +0.xxx     0.xxx   **
+  [XAI] soft_iou          0.xxxx     0.xxxx   +0.xxx     0.xxx   **
+  ...
+  Significance: * p<0.05   ** p<0.01   *** p<0.001
+```
+
 ---
 
-## Arguments
+## Output structure sau khi chạy xong
 
-### Chung (tất cả modes)
+```
+runs/final_run/
+├── args.json                              ← hyperparams đã dùng
+├── splits.json                            ← test set cố định
+│
+├── baseline_fold{0-4}.pth                 ← 5 checkpoints baseline
+├── proposed_fold{0-4}.pth                 ← 5 checkpoints proposed
+│
+├── baseline_fold{0-4}_history.json        ← loss/metrics từng epoch
+├── proposed_fold{0-4}_history.json
+│
+├── baseline_aggregate_results.json        ← mean ± std BUSI classification
+├── proposed_aggregate_results.json
+│
+├── Confusion_baseline_fold{0-4}.png       ← confusion matrix
+├── Confusion_proposed_fold{0-4}.png
+│
+├── xai_busi_intrinsic_results.json        ← XAI trên BUSI test set
+├── xai_busi_intrinsic_results.csv
+│
+├── xai_busbra_intrinsic_results.json      ← XAI + CLS trên BUS-BRA
+├── xai_busbra_intrinsic_results.csv
+│
+├── visualizations/
+│   └── intrinsic_compare_XX_<name>.png   ← CAM comparison figures
+│
+└── plots/
+    └── training_curves.png               ← loss / F1 / PG per epoch
+```
 
-| Argument | Default | Mô tả |
-|---|---|---|
-| `--mode` | — | `debug` / `train` / `evaluate` / `xai` / `xai-busbra` (bắt buộc) |
-| `--data_root` | `/workspace/Dataset_BUSI_with_GT` | Path đến BUSI dataset |
-| `--checkpoint` | `None` | Checkpoint `.pth` (bắt buộc với evaluate / xai / xai-busbra) |
-| `--batch_size` | `16` | Batch size |
-| `--seed` | `42` | Random seed (splits, aug, torch) |
-| `--tta` | `False` | Test-Time Augmentation |
-| `--cam_method` | `intrinsic` | `intrinsic` / `gradcam` / `gradcampp` cho `xai` và `xai-busbra` |
+### Mapping file → báo cáo
 
-### Train
-
-| Argument | Default | Mô tả |
-|---|---|---|
-| `--variant` | `both` | `A` / `B` / `both` |
-| `--folds` | `1` | Số folds (1 = early signal, 5 = full CV) |
-| `--epochs` | `50` | Max epochs mỗi fold |
-| `--aug` | `default` | `default` / `light` / `none` |
-| `--label_smoothing` | `0.1` | CrossEntropy label smoothing |
-| `--no_mixup` | `False` | Tắt mixup |
-| `--dropout` | `0.3` | Classifier dropout |
-| `--warmup_epochs` | `3` | Epochs frozen-backbone warmup |
-| `--warmup_lr` | `2e-4` | Head LR trong warmup |
-| `--head_lr` | `5e-5` | Head LR sau unfreeze |
-| `--backbone_lr` | `2e-5` | Backbone LR sau unfreeze |
-| `--sampler` | `balanced` | `shuffle` / `balanced` |
-| `--calibrate_logits` | `False` | Tune logit bias trên val trước eval |
-| `--mask_lambda1` | `1.0` | Dice alignment loss weight (Variant B) |
-| `--mask_lambda2` | `0.3` | Outside-mask loss weight (Variant B) |
-| `--backbone_weights` | `None` | Pretrained backbone `.pth` (strict=False) |
-| `--runs_dir` | `runs` | Thư mục chứa run outputs |
-| `--run_name` | `None` | Tên run folder (auto-generate nếu bỏ trống) |
-
-### Download BUSI
-
-| Argument | Default | Mô tả |
-|---|---|---|
-| `--download_dataset` | `False` | Tải BUSI từ KaggleHub |
-| `--download_dir` | `/workspace` | Thư mục tải vào |
-| `--force_download` | `False` | Ép tải lại |
-
-### xai-busbra
-
-| Argument | Default | Mô tả |
-|---|---|---|
-| `--busbra_data_root` | `./archive/BUSBRA/BUSBRA` | Path đến BUS-BRA |
-| `--busbra_download` | `False` | Auto-download BUS-BRA |
-| `--busbra_download_dir` | `./archive` | Thư mục tải BUS-BRA |
-| `--pathology` | `None` (all) | `benign` / `malignant` |
+| Nội dung báo cáo | File |
+|---|---|
+| Table: BUSI classification (Acc/F1/AUC) | `*_aggregate_results.json` |
+| Table: BUSI XAI (PG/IoU/Ratio/AUPRC) | `xai_busi_intrinsic_results.json` |
+| Table: BUS-BRA XAI + classification | `xai_busbra_intrinsic_results.json` |
+| Table: Per-class BUS-BRA | terminal output bước 5 |
+| Statistical significance | terminal output bước 8 |
+| Figure: CAM comparison | `visualizations/*.png` |
+| Figure: Training curves | `plots/training_curves.png` |
+| Figure: Confusion matrix | `Confusion_*.png` |
 
 ---
 
@@ -363,14 +320,69 @@ Chỉ dùng `L_cls`. XAI bằng intrinsic CAM (classifier weights).
 
 | Loss | Công thức | Mục đích |
 |---|---|---|
-| `L_cls` | CrossEntropy | Phân loại |
+| `L_cls` | CrossEntropy + label smoothing 0.1 | Phân loại |
 | `L_align` (λ=1.0) | Dice(CAM, mask) | CAM overlap với GT mask |
-| `L_out` (λ=0.3) | mean(CAM × (1−mask)) | Phạt CAM tràn ra ngoài |
+| `L_out` (λ=0.3) | mean(CAM × (1−mask)) | Phạt CAM tràn ra ngoài mask |
+
+Chỉ áp dụng `L_align` và `L_out` cho benign/malignant — normal class không có lesion.
 
 ### Training strategy
 
 - **Phase 1** (3 epochs): Backbone frozen, train head với `warmup_lr=2e-4`
 - **Phase 2** (47 epochs): Unfreeze backbone, CosineAnnealingLR, early stopping patience=10
+
+---
+
+## Arguments
+
+### Chung (tất cả modes)
+
+| Argument | Default | Mô tả |
+|---|---|---|
+| `--mode` | — | `debug` / `train` / `evaluate` / `xai` / `xai-busbra` (bắt buộc) |
+| `--data_root` | `/workspace/Dataset_BUSI_with_GT` | Path đến BUSI dataset |
+| `--checkpoint` | `None` | Checkpoint `.pth` (bắt buộc với evaluate / xai / xai-busbra) |
+| `--batch_size` | `16` | Batch size |
+| `--seed` | `42` | Random seed |
+| `--tta` | `False` | Test-Time Augmentation |
+| `--cam_method` | `intrinsic` | `intrinsic` / `gradcam` / `gradcampp` |
+
+### Download BUSI
+
+| Argument | Default | Mô tả |
+|---|---|---|
+| `--download_dataset` | `False` | Tải BUSI từ KaggleHub trước khi chạy |
+| `--download_dir` | `/workspace` | Thư mục tải vào (dùng persistent storage trên RunPod) |
+| `--force_download` | `False` | Ép tải lại dù đã có |
+
+### Train
+
+| Argument | Default | Mô tả |
+|---|---|---|
+| `--variant` | `both` | `A` / `B` / `both` |
+| `--folds` | `1` | Số folds (1 = early signal, 5 = full CV) |
+| `--epochs` | `50` | Max epochs mỗi fold |
+| `--aug` | `default` | `default` / `light` / `none` |
+| `--label_smoothing` | `0.1` | CrossEntropy label smoothing |
+| `--no_mixup` | `False` | Tắt mixup (baseline only) |
+| `--dropout` | `0.3` | Classifier dropout |
+| `--warmup_epochs` | `3` | Epochs frozen-backbone warmup |
+| `--warmup_lr` | `2e-4` | Head LR trong warmup |
+| `--head_lr` | `5e-5` | Head LR sau unfreeze |
+| `--backbone_lr` | `2e-5` | Backbone LR sau unfreeze |
+| `--sampler` | `balanced` | `shuffle` / `balanced` |
+| `--mask_lambda1` | `1.0` | Dice alignment loss weight (Variant B) |
+| `--mask_lambda2` | `0.3` | Outside-mask loss weight (Variant B) |
+| `--run_name` | `None` | Tên run folder (auto-generate nếu bỏ trống) |
+
+### xai-busbra
+
+| Argument | Default | Mô tả |
+|---|---|---|
+| `--busbra_data_root` | `./archive/BUSBRA/BUSBRA` | Path đến BUS-BRA root |
+| `--busbra_download` | `False` | Auto-download BUS-BRA lần đầu |
+| `--busbra_download_dir` | `./archive` | Thư mục tải BUS-BRA |
+| `--pathology` | `None` (all) | `benign` / `malignant` — filter subset |
 
 ---
 
@@ -381,4 +393,5 @@ Tested on RTX 5090.
 | | 1 fold (1 variant) | Full (5 fold × 2 variant) |
 |---|---|---|
 | RTX 5090 | ~4 min | ~40 min |
+| RTX 4090 | ~8 min | ~80 min |
 | Kaggle T4 | ~25 min | ~4 giờ |

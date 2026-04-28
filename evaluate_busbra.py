@@ -27,6 +27,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from PIL import Image
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -36,6 +37,7 @@ from models.lsec_net import LSECNet
 from metrics.metrics import compute_xai_metrics, aggregate_results
 
 BUSBRA_KAGGLE_HANDLE = 'orvile/bus-bra-a-breast-ultrasound-dataset'
+BUSBRA_CSV_FILENAME  = 'bus_data.csv'
 
 # BUS-BRA only has benign/malignant — map to BUSI class indices
 LABEL_MAP = {'benign': 1, 'malignant': 2}
@@ -64,9 +66,9 @@ class BUSBRADataset(Dataset):
             root:       path to BUSBRA root (contains Images/, Masks/, bus_data.csv)
             pathology:  None (all) | 'benign' | 'malignant' — filter subset
         """
-        csv_path = os.path.join(root, 'bus_data.csv')
+        csv_path = os.path.join(root, BUSBRA_CSV_FILENAME)
         if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"bus_data.csv not found in {root}")
+            raise FileNotFoundError(f"{BUSBRA_CSV_FILENAME} not found in {root}")
 
         df = pd.read_csv(csv_path)
         df['Pathology'] = df['Pathology'].str.strip().str.lower()
@@ -122,6 +124,11 @@ def _val_transform(img, mask):
 # ─────────────────────────────────────────────
 
 def download_busbra(download_dir='/workspace'):
+    """
+    Downloads BUS-BRA from KaggleHub into download_dir and returns the root
+    folder that contains bus_data.csv.
+    KaggleHub cache is redirected to download_dir via KAGGLE_CACHE_FOLDER env var.
+    """
     try:
         import kagglehub
     except ImportError as exc:
@@ -131,27 +138,22 @@ def download_busbra(download_dir='/workspace'):
         ) from exc
 
     os.makedirs(download_dir, exist_ok=True)
+    os.environ['KAGGLE_CACHE_FOLDER'] = download_dir
+
     print(f"Downloading BUS-BRA via KaggleHub into {download_dir} ...")
-    path = kagglehub.dataset_download(
-        BUSBRA_KAGGLE_HANDLE,
-        output_dir=download_dir,
-    )
+    path = kagglehub.dataset_download(BUSBRA_KAGGLE_HANDLE)
     print(f"Path to dataset files: {path}")
 
-    # Walk to find the folder that contains bus_data.csv
-    for dirpath, _, files in os.walk(path):
-        if 'bus_data.csv' in files:
-            print(f"BUS-BRA root found: {dirpath}")
-            return dirpath
-
-    for dirpath, _, files in os.walk(download_dir):
-        if 'bus_data.csv' in files:
-            print(f"BUS-BRA root found: {dirpath}")
-            return dirpath
+    for search_root in (path, download_dir):
+        for dirpath, _, files in os.walk(search_root):
+            if BUSBRA_CSV_FILENAME in files:
+                print(f"BUS-BRA root found: {dirpath}")
+                return dirpath
 
     raise FileNotFoundError(
-        f"Downloaded BUS-BRA but could not locate bus_data.csv. "
-        f"KaggleHub path: {path}"
+        f"Downloaded BUS-BRA but could not locate {BUSBRA_CSV_FILENAME}.\n"
+        f"KaggleHub path: {path}\n"
+        f"Search root  : {download_dir}"
     )
 
 
@@ -184,10 +186,62 @@ def evaluate_xai(model, loader, device, cam_method='intrinsic'):
     return compute_xai_metrics(torch.cat(cams), torch.cat(masks))
 
 
+def evaluate_cls(model, loader, device):
+    """
+    Classification eval on BUS-BRA (benign=1 vs malignant=2).
+    Uses the 3-class BUSI head — predicting normal(0) counts as wrong.
+
+    Metrics are computed to be directly comparable with evaluate_model() on BUSI:
+      - accuracy  : same formula (accuracy_score)
+      - f1_macro  : macro over labels [1,2] only — 2-class average (note in report)
+      - auc       : OvR over labels [1,2] using prob[:,1:] — consistent with BUSI OvR
+      - pct_pred_normal : fraction predicted as normal (cross-domain diagnostic)
+    """
+    model.eval()
+    all_labels, all_preds, all_probs = [], [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            img    = batch['image'].to(device)
+            labels = batch['label'].to(device)
+            logits, _ = model(img)
+            preds  = logits.argmax(1)
+            probs  = torch.softmax(logits, 1)
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    y_true = np.array(all_labels)
+    y_pred = np.array(all_preds)
+    y_prob = np.array(all_probs)    # shape [N, 3]
+
+    accuracy   = float(accuracy_score(y_true, y_pred))
+    f1         = float(f1_score(y_true, y_pred, labels=[1, 2],
+                                average='macro', zero_division=0))
+    pct_normal = float((y_pred == 0).mean())
+
+    try:
+        # OvR over the two present classes — consistent with BUSI multi_class='ovr'
+        # y_prob[:, 1:] gives [P(benign), P(malignant)]; labels=[1,2]
+        auc = float(roc_auc_score(
+            y_true, y_prob[:, 1:],
+            multi_class='ovr', labels=[1, 2],
+        ))
+    except ValueError:
+        auc = float('nan')
+
+    return {
+        'cls_accuracy':    accuracy,
+        'cls_f1_macro':    f1,
+        'cls_auc':         auc,
+        'pct_pred_normal': pct_normal,
+    }
+
+
 def run(args, device):
     # ── resolve data root ──────────────────────
     data_root = args.data_root
-    if data_root is None or not os.path.exists(os.path.join(data_root, 'bus_data.csv')):
+    if data_root is None or not os.path.exists(os.path.join(data_root, BUSBRA_CSV_FILENAME)):
         if args.download:
             data_root = download_busbra(args.download_dir)
         else:
@@ -211,7 +265,7 @@ def run(args, device):
 
     pathology_tag = args.pathology or 'all'
     print(f"\n{'='*60}")
-    print(f"  BUS-BRA XAI Evaluation")
+    print("  BUS-BRA Evaluation (XAI + Classification)")
     print(f"  Data root  : {data_root}")
     print(f"  Pathology  : {pathology_tag}  ({len(dataset)} samples)")
     print(f"{'='*60}")
@@ -226,22 +280,25 @@ def run(args, device):
 
         model = LSECNet(num_classes=3, pretrained=False).to(device)
         state = torch.load(ckpt_path, map_location=device)
-        # support raw state_dict or wrapped checkpoint
         if isinstance(state, dict) and 'state_dict' in state:
             state = state['state_dict']
         model.load_state_dict(state)
 
-        ckpt_name = os.path.splitext(os.path.basename(ckpt_path))[0]
         print(f"\n  Checkpoint : {ckpt_path}")
 
         xai = evaluate_xai(model, loader, device, cam_method=args.cam_method)
+        cls = evaluate_cls(model, loader, device)
 
-        print(f"  Pointing Game : {xai['pointing_game']:.4f}")
-        print(f"  Soft IoU      : {xai['soft_iou']:.4f}")
-        print(f"  Inside Ratio  : {xai['inside_ratio']:.4f}")
-        print(f"  AUPRC         : {xai['auprc']:.4f}")
+        print(f"  [XAI]  Pointing Game : {xai['pointing_game']:.4f}")
+        print(f"  [XAI]  Soft IoU      : {xai['soft_iou']:.4f}")
+        print(f"  [XAI]  Inside Ratio  : {xai['inside_ratio']:.4f}")
+        print(f"  [XAI]  AUPRC         : {xai['auprc']:.4f}")
+        print(f"  [CLS]  Accuracy      : {cls['cls_accuracy']:.4f}")
+        print(f"  [CLS]  F1 macro      : {cls['cls_f1_macro']:.4f}")
+        print(f"  [CLS]  AUC           : {cls['cls_auc']:.4f}")
+        print(f"  [CLS]  % pred normal : {cls['pct_pred_normal']:.4f}")
 
-        fold_results.append(xai)
+        fold_results.append({**xai, **cls})
 
     if not fold_results:
         print("\n  No valid checkpoints found.")

@@ -194,60 +194,55 @@ train_val, test_set, folds = make_splits(file_list)
 
 ---
 
-### 2.3 Dataset Class
+### 2.3 Dataset Class & Augmentation
+
+> **Quan trọng:** Augmentation spatial (flip, rotate, crop) phải apply **đồng thời** lên image và mask (cùng random state) để tránh misalignment. Dùng `PairedTransform` thay vì `transforms.Compose` thông thường.
 
 ```python
-import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+import torchvision.transforms.functional as TF
 
-CLASS_MAP = {'normal': 0, 'benign': 1, 'malignant': 2}
-
-class BUSIDataset(Dataset):
-    def __init__(self, file_list, transform=None):
-        self.file_list = file_list
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.file_list)
-
-    def __getitem__(self, idx):
-        img_path, mask_path, label = self.file_list[idx]
-        img  = Image.open(img_path).convert('RGB')
-        mask = np.array(Image.open(mask_path).convert('L'))
-        mask = torch.from_numpy((mask > 128).astype(np.float32)).unsqueeze(0)
-
-        if self.transform:
-            img = self.transform(img)
-
-        return {'image': img, 'mask': mask,
-                'label': torch.tensor(label, dtype=torch.long)}
-
-def get_transforms(mode='train'):
-    if mode == 'train':
-        return transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(0.5),
-            transforms.RandomVerticalFlip(0.5),
-            transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
-        ])
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
-    ])
+class PairedTransform:
+    """Applies spatial augmentation identically to image AND mask."""
+    def __call__(self, img, mask):
+        # img: PIL RGB  |  mask: PIL L
+        if self.mode == 'train':
+            # RandomResizedCrop — cùng params cho cả image và mask
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                img, scale=(0.75, 1.0), ratio=(0.85, 1.15))
+            img  = TF.resized_crop(img,  i, j, h, w, [224, 224])
+            mask = TF.resized_crop(mask, i, j, h, w, [224, 224],
+                                   interpolation=InterpolationMode.NEAREST)
+            # Flip — cùng random decision
+            if random.random() < 0.5:
+                img, mask = TF.hflip(img), TF.hflip(mask)
+            if random.random() < 0.5:
+                img, mask = TF.vflip(img), TF.vflip(mask)
+            # Rotation
+            angle = random.uniform(-20, 20)
+            img  = TF.rotate(img,  angle)
+            mask = TF.rotate(mask, angle, interpolation=InterpolationMode.NEAREST)
+            # Color jitter (image only)
+            img = ColorJitter(brightness=0.4, contrast=0.4, saturation=0.15)(img)
+            # Gaussian noise — simulate ultrasound speckle (image only, sau normalize)
+        img  = TF.normalize(TF.to_tensor(img),
+                            [0.485,0.456,0.406], [0.229,0.224,0.225])
+        mask = torch.from_numpy(
+            (np.array(mask, dtype=np.float32) > 128).astype(np.float32)).unsqueeze(0)
+        return img, mask
 ```
 
-**✅ PASS:** image `[3,224,224]`, mask `[1,224,224]` binary `{0,1}`.
+**✅ PASS:** image `[3,224,224]`, mask `[1,224,224]` binary `{0,1}`.  
+**✅ PASS:** Overlay image + mask contour — lesion region khớp sau augmentation.
 
 ---
 
 ## Phase 3 — Model & Loss (20 phút)
 
-### 3.1 Model — EfficientNet-B3 + Intrinsic CAM
+### 3.1 Model — ConvNeXt-Tiny + Intrinsic CAM
+
+> **Backbone thực tế dùng ConvNeXt-Tiny** (không phải EfficientNet-B3).  
+> Lý do: ConvNeXt-Tiny cho accuracy cao hơn và train nhanh hơn trên dataset nhỏ (~780 ảnh), feat_dim = **768** (không phải 1536).
 
 ```python
 import timm
@@ -255,24 +250,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class LSECNet(nn.Module):
-    def __init__(self, num_classes=3, pretrained=True):
+    def __init__(self, num_classes=3, pretrained=True, dropout=0.3):
         super().__init__()
         self.backbone = timm.create_model(
-            'efficientnet_b3', pretrained=pretrained,
+            'convnext_tiny', pretrained=pretrained,
             num_classes=0, global_pool=''
         )
+        feat_dim        = self.backbone.num_features   # 768 for ConvNeXt-Tiny
         self.gap        = nn.AdaptiveAvgPool2d(1)
-        self.dropout    = nn.Dropout(0.3)
-        self.classifier = nn.Linear(1536, num_classes)
+        self.dropout    = nn.Dropout(dropout)
+        self.classifier = nn.Linear(feat_dim, num_classes)
 
     def forward(self, x):
-        feat   = self.backbone(x)                      # [B,1536,7,7]
+        feat   = self.backbone(x)                      # [B, 768, 7, 7]
         logits = self.classifier(
                      self.dropout(self.gap(feat).flatten(1)))
         return logits, feat
 
     def get_cam(self, feat, labels, size=(224, 224)):
-        w   = self.classifier.weight[labels]            # [B,1536]
+        w   = self.classifier.weight[labels]            # [B, 768]
         cam = torch.einsum('bchw,bc->bhw', feat, w)
         cam = F.relu(cam)
         B   = cam.shape[0]
@@ -283,7 +279,7 @@ class LSECNet(nn.Module):
                              mode='bilinear', align_corners=False)
 ```
 
-**✅ PASS:** feat `[B,1536,7,7]`, CAM `[B,1,224,224]` ∈ `[0,1]`, no NaN.
+**✅ PASS:** feat `[B,768,7,7]`, CAM `[B,1,224,224]` ∈ `[0,1]`, no NaN.
 
 ---
 
@@ -299,9 +295,10 @@ def outside_loss(cam, mask):
     return (cam * (1 - mask)).mean()
 
 class LSECLoss(nn.Module):
-    def __init__(self, lambda1=1.0, lambda2=0.3, class_weights=None):
+    def __init__(self, lambda1=1.0, lambda2=0.3, class_weights=None, label_smoothing=0.1):
         super().__init__()
-        self.ce = nn.CrossEntropyLoss(weight=class_weights)
+        # label_smoothing=0.1 giúp tránh overconfident predictions trên dataset nhỏ
+        self.ce = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
         self.l1, self.l2 = lambda1, lambda2
 
     def forward(self, logits, feat, model, labels, masks):
@@ -343,12 +340,21 @@ def inside_ratio(cam, mask):
     total  = cam.sum(dim=[1,2,3])
     return (inside / (total + 1e-8)).mean().item()
 
+def xai_auprc(cam, mask):
+    """Pixel-level AUPRC — không cần chọn threshold, robust với small lesion."""
+    from sklearn.metrics import average_precision_score
+    scores  = cam.view(cam.shape[0], -1).numpy()
+    targets = mask.view(mask.shape[0], -1).numpy().astype(np.uint8)
+    values  = [average_precision_score(t, s) for t, s in zip(targets, scores) if t.sum() > 0]
+    return float(np.mean(values)) if values else float('nan')
+
 def compute_xai_metrics(cam, mask):
     cam, mask = cam.detach().cpu(), mask.cpu()
     return {
         'pointing_game': pointing_game(cam, mask),
         'soft_iou':      soft_iou(cam, mask),
         'inside_ratio':  inside_ratio(cam, mask),
+        'auprc':         xai_auprc(cam, mask),   # thêm: không cần threshold
     }
 ```
 
@@ -425,31 +431,34 @@ def compute_class_weights(labels, num_classes):
 
 ```python
 def run_fold(model, criterion, train_loader, val_loader,
-             epochs, device, fold_idx):
+             epochs, device, fold_idx,
+             warmup_epochs=3, backbone_lr=2e-5, head_lr=5e-5, warmup_lr=2e-4):
     backbone_params = list(model.backbone.parameters())
     head_params     = (list(model.gap.parameters()) +
                        list(model.dropout.parameters()) +
                        list(model.classifier.parameters()))
 
-    # Phase 1 (5 epochs): freeze backbone
+    # Phase 1 (3 epochs): freeze backbone, train head only
     for p in backbone_params:
         p.requires_grad = False
-    optimizer = torch.optim.AdamW(head_params, lr=1e-3, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(head_params, lr=warmup_lr, weight_decay=1e-3)
 
     best_f1, best_state, patience = 0.0, None, 0
-    WARMUP = 5
+    WARMUP = warmup_epochs  # 3 epochs (không phải 5)
 
     for epoch in range(epochs):
         # Switch Phase 2
         if epoch == WARMUP:
             for p in backbone_params:
                 p.requires_grad = True
-            optimizer = torch.optim.AdamW([
-                {'params': backbone_params, 'lr': 1e-5},
-                {'params': head_params,     'lr': 1e-4}
-            ], weight_decay=1e-4)
+            # add_param_group giữ nguyên head momentum tích lũy từ phase 1
+            optimizer.add_param_group(
+                {'params': backbone_params, 'lr': backbone_lr, 'weight_decay': 1e-3}
+            )
+            optimizer.param_groups[0]['lr'] = head_lr  # head: 5e-5 sau unfreeze
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=epochs - WARMUP)
+            patience = 0  # fresh patience budget cho phase 2
 
         # Train epoch
         model.train()
@@ -485,7 +494,7 @@ def run_fold(model, criterion, train_loader, val_loader,
 ### 4.3 Evaluate Function
 
 ```python
-XAI_ACC_THRESHOLD = 0.88  # Chỉ evaluate XAI khi accuracy >= 88%
+XAI_ACC_THRESHOLD = 0.88  # Chỉ evaluate XAI khi accuracy >= 88% — CAM noise khi model chưa converge
 
 def evaluate(model, loader, device):
     model.eval()
@@ -658,12 +667,97 @@ print_result_table(baseline_results, proposed_results)
 
 ---
 
+## Phase 6 — Cross-Dataset Evaluation trên BUS-BRA
+
+> **Dataset:** BUS-BRA — 1875 ảnh siêu âm vú, chỉ có 2 class: benign (722) và malignant (342).  
+> **Mục đích:** Kiểm tra generalizability của model khi không retrain.
+
+### 6.1 Vấn đề class mismatch
+
+Model được train trên BUSI với 3 class (`normal=0`, `benign=1`, `malignant=2`).  
+BUS-BRA không có class `normal`, nhưng labels được map **đúng index**: `benign=1`, `malignant=2`.
+
+Điều này có nghĩa:
+- Model vẫn output 3 logits khi inference trên BUS-BRA
+- Nếu model predict `normal (0)` cho BUS-BRA sample → **tính là sai** (valid penalty)
+- Binary accuracy/F1 tính trên 2 class {1, 2} → **fair evaluation**
+
+### 6.2 XAI Evaluation (đã có)
+
+```python
+# Chạy XAI trên BUS-BRA (đã implement trong evaluate_busbra.py)
+python main.py \
+    --mode xai-busbra \
+    --checkpoint runs/<run>/proposed_fold{0,1,2,3,4}.pth \
+    --busbra_data_root ./archive/BUSBRA/BUSBRA
+```
+
+Output: Pointing Game / Soft IoU / Inside Ratio / AUPRC trên 1875 ảnh.
+
+### 6.3 Classification Evaluation (cần thêm)
+
+Thêm binary classification eval trên BUS-BRA sử dụng 3-class model:
+
+```python
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+
+def evaluate_busbra_cls(model, loader, device):
+    """Binary classification eval: benign(1) vs malignant(2), ignoring normal(0) predictions."""
+    model.eval()
+    all_labels, all_preds, all_probs = [], [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            img    = batch['image'].to(device)
+            labels = batch['label'].to(device)      # 1 hoặc 2 (không có 0)
+            logits, _ = model(img)
+            preds  = logits.argmax(1)
+            probs  = torch.softmax(logits, 1)       # [B, 3]
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs[:, 1:].cpu().numpy())  # chỉ lấy col 1,2
+
+    y_true = np.array(all_labels)
+    y_pred = np.array(all_preds)
+
+    # Nếu predict normal (0) → sai; binary F1 chỉ tính class 1 vs 2
+    accuracy = (y_true == y_pred).mean()
+    f1       = f1_score(y_true, y_pred, labels=[1, 2], average='macro', zero_division=0)
+
+    # % samples bị predict nhầm thành normal — cross-domain insight
+    pct_predicted_normal = (y_pred == 0).mean()
+
+    print(f"  BUS-BRA Binary Accuracy : {accuracy:.4f}")
+    print(f"  BUS-BRA F1 (macro 1v2)  : {f1:.4f}")
+    print(f"  % predicted as normal   : {pct_predicted_normal:.4f}  ← cross-domain signal")
+
+    return {'busbra_accuracy': accuracy, 'busbra_f1': f1,
+            'busbra_pct_normal': pct_predicted_normal}
+```
+
+> **Lưu ý khi viết báo cáo:** Nêu rõ *"Model trained on 3-class BUSI (normal/benign/malignant), evaluated on 2-class BUS-BRA using the same class indices. Samples predicted as 'normal' are counted as misclassified — this reflects conservative generalizability."*
+
+### 6.4 Expected Results Table (BUS-BRA)
+
+| Metric | Baseline | LSEC-Net (ours) |
+|---|---|---|
+| Binary Accuracy | [TBD] | [TBD] |
+| Binary F1 macro | [TBD] | [TBD] |
+| % predicted as normal | [TBD] | [TBD] |
+| Pointing Game | [TBD] | [TBD] |
+| Soft IoU | [TBD] | [TBD] |
+| Inside Ratio | [TBD] | [TBD] |
+| AUPRC | [TBD] | [TBD] |
+
+---
+
 ## Ước Tính Thời Gian
 
-| Platform | 1 Fold | 5 Folds × 2 Variants | XAI Eval | Tổng |
-|----------|--------|----------------------|----------|------|
-| Kaggle T4 | ~20 min | ~200 min | ~15 min | **~3.5 giờ** |
-| RTX 4090  | ~5 min  | ~50 min  | ~5 min  | **~1 giờ**   |
+| Platform | 1 Fold | 5 Folds × 2 Variants | XAI + BUS-BRA Eval | Tổng |
+|----------|--------|----------------------|--------------------|------|
+| Kaggle T4 | ~20 min | ~200 min | ~20 min | **~4 giờ** |
+| RTX 5090  | ~4 min  | ~40 min  | ~5 min  | **~45 phút** |
 
 > Kaggle session limit = 9 giờ → đủ dùng. **Lưu checkpoint sau mỗi fold!**
 
@@ -689,14 +783,15 @@ torch.save(best_model_state, f'/kaggle/working/fold{fold_idx}_proposed.pth')
 - [ ] Stratified test set: ~156 ảnh, tỉ lệ class đúng
 - [ ] 5 folds tạo xong trên 624 ảnh còn lại
 - [ ] `BUSIDataset`: image `[3,224,224]`, mask `[1,224,224]` ∈ `{0,1}`
+- [ ] Paired augmentation: overlay image + mask contour khớp nhau sau transform
 
 ### Phase 3 — Model & Loss
-- [ ] `LSECNet.forward()`: logits `[B,3]`, feat `[B,1536,7,7]`
+- [ ] `LSECNet.forward()`: logits `[B,3]`, feat `[B,768,7,7]`
 - [ ] `get_cam()`: output `[B,1,224,224]` ∈ `[0,1]`, no NaN
-- [ ] `LSECLoss`: `backward()` không error, no NaN grad
+- [ ] `LSECLoss` với `label_smoothing=0.1`: `backward()` không error, no NaN grad
 - [ ] Khi `use_mask_loss=False`: L_align = L_out = 0.0
 - [ ] `pointing_game()` với random CAM → ~0.5 (sanity check)
-- [ ] `soft_iou()`, `inside_ratio()` ∈ `[0,1]`
+- [ ] `soft_iou()`, `inside_ratio()`, `auprc()` ∈ `[0,1]`
 
 ### Phase 4 — Training
 - [ ] Debug 2 epochs, 5 batches → no crash, no NaN loss
@@ -709,9 +804,15 @@ torch.save(best_model_state, f'/kaggle/working/fold{fold_idx}_proposed.pth')
 
 ### Phase 5 — Visualization
 - [ ] Qualitative figure: ≥3 ảnh, 4 cột, rõ ràng
-- [ ] Result table in ra đủ 6 metrics
+- [ ] Result table in ra đủ 7 metrics (thêm AUPRC)
 - [ ] Figures saved ≥ 150 DPI
+
+### Phase 6 — Cross-Dataset (BUS-BRA)
+- [ ] XAI eval chạy xong → 4 metrics trên 1875 ảnh
+- [ ] Binary classification eval: accuracy + F1 macro (benign vs malignant)
+- [ ] Ghi nhận % predicted as normal (cross-domain insight)
+- [ ] Baseline vs Proposed so sánh trên BUS-BRA
 
 ---
 
-*Plan v2 — Stratified Test Split + 5-Fold CV + 3 XAI Metrics*
+*Plan v3 — ConvNeXt-Tiny + 4 XAI Metrics + BUS-BRA Classification Eval*
